@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#f4f2ea">
+<!-- Project name: MTAG — Moy's Talking Avatar Generator -->
+<title>阿墨的说话小人生成器 MTAG</title>
+<style>
+:root {
+  --paper: #f4f2ea;          /* 漫画纸底 */
+  --ink: #141414;            /* 墨 */
+  --card: #ffffff;
+  --gray: #6d685c;
+  --track: #d9d4c7;
+  --red: #d92d20;            /* 仅用于错误/必需标记（朱砂） */
+  --accent: #ce6a5a;         /* 赤陶红：播放/主操作专属 */
+  --shadow: 4px 4px 0 var(--ink);
+  --shadow-sm: 3px 3px 0 var(--ink);
+  --radius: 10px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--paper); color: var(--ink);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+
+/* ===== 舞台区：始终固定，不滚动 ===== */
+.stage-area { flex: 0 0 auto; display: flex; flex-direction: column; min-height: 0; }
+#stage {
+  position: relative; overflow: hidden;
+  height: clamp(180px, 30dvh, 320px);
+  background:
+    radial-gradient(rgba(20, 20, 20, .13) 1.1px, transparent 1.4px) 0 0 / 9px 9px,
+    radial-gradient(rgba(20, 20, 20, .13) 1.1px, transparent 1.4px) 4.5px 4.5px / 9px 9px,
+    #fff;
+}
+#stage-canvas { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 14px; }
+#canvas { max-width: 100%; max-height: 100%; display: block; cursor: pointer; }
+#canvas:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+#preview-hint {
+  position: absolute; bottom: 14px; left: 16px; z-index: 2;
+  color: var(--ink); font-size: 14px; line-height: 1.55;
+  font-weight: 700; text-align: left; white-space: normal; pointer-events: none;
+  background: rgba(255, 255, 255, .9); padding: 7px 10px; border-radius: 8px;
+}
+#preview-hint[hidden] { display: none; }
+#drop-hint {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 5px; text-align: center;
+  color: var(--ink); font-size: 13.5px; pointer-events: auto; padding: 0 24px;
+}
+#drop-hint .drop-title { font-size: 18px; font-weight: 800; }
+#drop-hint b { font-weight: 800; }
+#drop-hint .hint { color: var(--gray); font-size: 14px; }
+#reuse-image-btn { margin-top: 4px; padding: 7px 12px; font-size: 12.5px; }
+#reuse-image-btn[hidden] { display: none; }
+#stage.drag-over { outline: 3px dashed var(--ink); outline-offset: -12px; }
+#stage.drag-over::after {
+  content: "松开以导入文件"; position: absolute; inset: 12px; z-index: 7;
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 16px;
+  color: var(--ink); font-size: 15px; font-weight: 800; pointer-events: none;
+}
+
+/* 导出进度浮条（叠在画布下方） */
+#export-progress-wrap {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  width: min(560px, calc(100% - 28px)); z-index: 6;
+  display: flex; flex-direction: column; gap: 6px;
+  background: #fff; border: 2px solid var(--ink); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 10px 12px;
+}
+#export-progress-wrap[hidden] { display: none; }
+#export-progress-label { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
+#export-progress-row { display: flex; align-items: center; gap: 8px; }
+#export-progress { flex: 1; }
+progress { -webkit-appearance: none; appearance: none; height: 8px; border: none; background: transparent; }
+progress::-webkit-progress-bar { background: var(--track); border-radius: 99px; border: 1.5px solid var(--ink); }
+progress::-webkit-progress-value { background: var(--ink); border-radius: 99px; }
+progress::-moz-progress-bar { background: var(--ink); border-radius: 99px; }
+#btn-stop-export { padding: 4px 10px; font-size: 11px; white-space: nowrap; box-shadow: 2px 2px 0 var(--ink); }
+
+/* 播放控制条（画布正下方） */
+.transport {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; background: #fff;
+  border-top: 3px solid var(--ink); border-bottom: 3px solid var(--ink);
+}
+#btn-seek-play {
+  flex: none; width: 42px; height: 42px; border-radius: 50%;
+  background: var(--accent); color: var(--ink); border: 2px solid var(--ink); cursor: pointer;
+  font-size: 0; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: var(--shadow-sm); transition: transform .12s, box-shadow .12s;
+}
+/* 播放/暂停图标用 CSS 图形而非文字 glyph，避免字体渲染偏移 */
+#btn-seek-play::before {
+  content: ""; width: 15px; height: 16px; background: currentColor;
+  clip-path: polygon(18% 2%, 18% 98%, 92% 50%); transform: translateX(1px);
+}
+#btn-seek-play.is-playing::before {
+  width: 14px; height: 15px; transform: none; clip-path: none;
+  background: linear-gradient(90deg, currentColor 0 34%, transparent 34% 66%, currentColor 66% 100%);
+}
+#btn-seek-play:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
+#btn-seek-play:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+#btn-seek-play:disabled { opacity: .35; cursor: not-allowed; box-shadow: none; }
+#t-cur, #t-total { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#seek { flex: 1; min-width: 0; }
+#state-badge {
+  flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; font-weight: 700; background: #fff;
+  border: 2px solid var(--ink); border-radius: 99px; padding: 2px 10px;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+/* ===== 参数面板：整体滚动 ===== */
+.panel {
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 14px 14px calc(20px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; gap: 14px;
+  background: var(--paper);
+  scrollbar-width: thin; scrollbar-color: var(--ink) transparent;
+}
+.panel > * { flex-shrink: 0; }
+.panel::-webkit-scrollbar { width: 8px; }
+.panel::-webkit-scrollbar-thumb { background: var(--ink); border-radius: 99px; }
+
+.panel-head { padding: 0 2px; }
+.title-row { display: flex; align-items: center; gap: 10px; }
+.panel-head h1 { font-size: 20px; font-weight: 800; letter-spacing: 1px; }
+.name-en { font-size: 11px; font-weight: 800; color: var(--gray); letter-spacing: 2px; margin-left: 8px; vertical-align: 2px; }
+.product-acronym { font-size: 11px; font-weight: 800; letter-spacing: 2px; color: var(--gray); vertical-align: 2px; }
+.v2-badge {
+  font-size: 10.5px; font-weight: 800; background: #fff; color: var(--ink);
+  border: 2px solid var(--ink); border-radius: 6px; padding: 2px 7px;
+  box-shadow: 2px 2px 0 var(--ink); transform: rotate(-3deg);
+}
+.panel-head p { margin-top: 4px; font-size: 12px; color: var(--gray); font-weight: 600; }
+
+/* 卡片 / 折叠节 */
+.card { background: var(--card); border: 2px solid var(--ink); border-radius: var(--radius); box-shadow: var(--shadow); }
+details.card { overflow: hidden; }
+details.card > summary {
+  list-style: none; display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; cursor: pointer; user-select: none;
+  font-size: 14px; font-weight: 800; letter-spacing: .3px;
+  transition: background .15s, color .15s;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary:hover { background: #efeadf; }
+details.card[open] > summary { background: var(--ink); color: #fff; }
+.step {
+  flex: none; width: 22px; height: 22px; border-radius: 6px;
+  background: var(--ink); color: #fff;
+  font-size: 11.5px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center;
+}
+details.card[open] > summary .step { background: #fff; color: var(--ink); }
+.summary-sub { margin-left: auto; margin-right: 4px; font-size: 11px; font-weight: 600; color: var(--gray); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+details.card[open] > summary .summary-sub { color: rgba(255, 255, 255, .65); }
+.chev { flex: none; font-size: 14px; font-weight: 800; transition: transform .18s ease; }
+details.card[open] > summary .chev { transform: rotate(90deg); }
+.card-body { padding: 14px; }
+
+/* 操作区 */
+.actions-row { display: flex; gap: 8px; margin-bottom: 8px; }
+#export-mode { flex: 1; min-width: 0; }
+.switch-list { margin-top: 12px; padding-top: 12px; border-top: 2px dashed rgba(20, 20, 20, .25); display: grid; gap: 10px; }
+
+/* 导出折叠区 */
+.export-body { margin-top: 12px; padding-top: 12px; border-top: 2px dashed rgba(20, 20, 20, .25); }
+.export-body[hidden] { display: none; }
+.export-params { margin-top: 12px; padding-top: 12px; border-top: 2px dashed rgba(20, 20, 20, .25); }
+
+/* 按钮 */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 14px; border-radius: 8px; cursor: pointer; font-family: inherit;
+  background: #fff; color: var(--ink); border: 2px solid var(--ink);
+  font-size: 13px; font-weight: 700;
+  box-shadow: var(--shadow-sm);
+  transition: transform .12s, box-shadow .12s, background .12s;
+}
+.btn:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
+.btn:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: var(--ink); }
+.btn.icon { padding: 9px 12px; }
+.btn.grow { flex: 1; }
+#btn-play { flex: 3 1 0; min-width: 0; }
+#btn-export-toggle { flex: 2 1 0; min-width: 0; }
+
+/* 开关 */
+.check { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 700; cursor: pointer; margin: 12px 0; }
+.switch-list .check { margin: 0; }
+.check input[type=checkbox] {
+  flex: none; -webkit-appearance: none; appearance: none; box-sizing: border-box;
+  width: 42px; height: 24px; border-radius: 99px; cursor: pointer;
+  background: #fff; border: 2px solid var(--ink); position: relative;
+  transition: background .18s;
+}
+.check input[type=checkbox]::before {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--ink); transition: transform .18s;
+}
+.check input[type=checkbox]:checked { background: var(--accent); }
+.check input[type=checkbox]:checked::before { background: #fff; transform: translateX(18px); }
+.check input[type=checkbox]:disabled { opacity: .4; cursor: not-allowed; }
+
+/* 素材槽 */
+.slots-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.slot { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.slot-thumb {
+  width: 100%; aspect-ratio: 1; border-radius: 10px; cursor: pointer; position: relative;
+  border: 2px dashed rgba(20, 20, 20, .4);
+  background: #fff center / contain no-repeat;
+  display: flex; align-items: center; justify-content: center; color: var(--gray); font-size: 20px;
+  transition: border-color .15s, box-shadow .15s, transform .15s;
+}
+.slot-thumb:hover { border-color: var(--ink); transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--ink); }
+.slot-thumb.loaded { border-style: solid; border-color: var(--ink); box-shadow: var(--shadow-sm); }
+.slot-thumb .tag {
+  position: absolute; top: 5px; left: 5px; font-size: 9px; font-weight: 800;
+  background: var(--ink); color: #fff; border-radius: 4px; padding: 1px 5px;
+}
+.slots-grid .slot-thumb:not(.loaded)::after {
+  content: "＋"; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(20, 20, 20, .42); font-size: 34px; font-weight: 500;
+  line-height: 1; pointer-events: none;
+}
+.slot-thumb.loading { border-style: solid; border-color: var(--ink); opacity: .8; cursor: progress; }
+.slot-thumb.loading .tag { opacity: .35; }
+.slots-grid .slot-thumb.loading::after {
+  content: ""; position: absolute; width: 18px; height: 18px; margin: auto; top: 0; right: 0; bottom: 0; left: 0;
+  border: 3px solid rgba(20, 20, 20, .25); border-top-color: var(--ink);
+  border-radius: 50%; animation: slot-spin .8s linear infinite;
+}
+@keyframes slot-spin { to { transform: rotate(360deg); } }
+.slots-grid .slot-thumb.drag-over::after { display: none; }
+.slot-thumb.drag-over { border-style: solid; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(20, 20, 20, .25); }
+.slot-thumb.drag-over::before {
+  content: "放到这里"; position: absolute; inset: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink); background: rgba(255, 255, 255, .88); font-size: 10px; font-weight: 800; border-radius: 8px;
+}
+.slot-name { font-size: 11px; font-weight: 700; text-align: center; }
+.slot-name em { font-style: normal; color: var(--red); }
+.audio-row {
+  display: flex; align-items: center; gap: 12px; cursor: pointer;
+}
+.audio-row.drag-over .slot-thumb { border-style: solid; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(20, 20, 20, .25); }
+.audio-row.drag-over .slot-thumb::before {
+  content: "放到这里"; position: absolute; inset: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink); background: rgba(255, 255, 255, .88); font-size: 10px; font-weight: 800; border-radius: 8px;
+}
+.audio-row .slot-thumb { width: 56px; flex: none; }
+#audio-name { font-size: 12px; color: var(--gray); font-weight: 600; word-break: break-all; }
+.media-status {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 12px;
+  padding: 9px 10px; background: #fff; border: 2px solid var(--ink); border-radius: 8px;
+  box-shadow: 2px 2px 0 var(--ink); font-size: 11px; font-weight: 700;
+}
+.media-status[hidden] { display: none; }
+.media-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#media-status-text { min-width: 0; overflow-wrap: anywhere; }
+#media-status-percent { flex: none; font-variant-numeric: tabular-nums; }
+.media-status progress { width: 100%; height: 7px; }
+.media-status progress[hidden], #media-status-percent[hidden] { display: none; }
+.media-status .btn { width: 100%; margin-top: 2px; }
+.media-status .btn[hidden] { display: none; }
+.media-status[data-state="ok"] { color: var(--ink); }
+.media-status[data-state="error"] { color: var(--red); border-color: var(--red); box-shadow: 2px 2px 0 var(--red); }
+
+/* 参数控件 */
+.param { margin-bottom: 16px; }
+.param:last-child { margin-bottom: 0; }
+.param-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.param-head > label { flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; }
+.param.disabled { opacity: .45; }
+.param-value { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.param-value input[type=number] { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
+.param input[type=range] { width: 100%; }
+.param .hint { margin-top: 4px; }
+.param-label { display: flex; justify-content: space-between; font-size: 12.5px; font-weight: 700; margin-bottom: 8px; }
+.param-reset {
+  flex: none; width: 28px; height: 28px; padding: 5px; display: inline-flex;
+  align-items: center; justify-content: center; border: 2px solid var(--ink);
+  border-radius: 6px; background: #fff; color: var(--ink); cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink); transition: transform .12s, box-shadow .12s, background .12s;
+}
+.param-reset[hidden] { display: none; }
+.param-reset svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.param-reset:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--ink); background: var(--paper); }
+.param-reset:active:not(:disabled) { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
+.param-reset:disabled { opacity: .4; cursor: not-allowed; box-shadow: none; }
+.svg-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; height: 22px; cursor: pointer; padding: 0; }
+input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 99px; background: var(--track); border: 1px solid rgba(20, 20, 20, .35); }
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; box-sizing: border-box; width: 16px; height: 16px; margin-top: -7px;
+  border-radius: 50%; background: #fff; border: 2.5px solid var(--ink);
+  box-shadow: 2px 2px 0 rgba(20, 20, 20, .9); transition: transform .12s;
+}
+input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+input[type=range]::-moz-range-track { height: 4px; border-radius: 99px; background: var(--track); border: 1px solid rgba(20, 20, 20, .35); }
+input[type=range]::-moz-range-thumb {
+  box-sizing: border-box; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; border: 2.5px solid var(--ink); box-shadow: 2px 2px 0 rgba(20, 20, 20, .9);
+}
+input[type=range]:disabled { opacity: .4; cursor: not-allowed; }
+
+input[type=number], select {
+  background: #fff; color: var(--ink); font-family: inherit; font-weight: 600;
+  border: 2px solid var(--ink); border-radius: 8px;
+  padding: 5px 8px; font-size: 12.5px;
+}
+input[type=number]:focus, select:focus { outline: none; box-shadow: var(--shadow-sm); }
+input[type=number].invalid { border-color: var(--red); box-shadow: 2px 2px 0 var(--red); }
+input[type=number]:disabled, select:disabled { opacity: .4; }
+
+/* 导出范围 */
+.export-range { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.export-range label { display: flex; flex-direction: column; gap: 4px; color: var(--gray); font-size: 11px; font-weight: 700; }
+.export-range input[type=number] { width: 100%; }
+.range-footer { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.range-footer .btn { padding: 4px 10px; font-size: 11.5px; box-shadow: 2px 2px 0 var(--ink); }
+.range-footer .hint { flex: 1; text-align: right; }
+
+/* 导出范围双滑块：两个 range 叠放，只有拇指接收指针事件 */
+.dual-range { position: relative; height: 22px; margin-bottom: 8px; }
+.dual-range-track {
+  position: absolute; left: 0; right: 0; top: 50%; height: 4px; transform: translateY(-50%);
+  border-radius: 99px; background: var(--track); border: 1px solid rgba(20, 20, 20, .35);
+  pointer-events: none;
+}
+.dual-range-fill {
+  position: absolute; top: 50%; height: 4px; transform: translateY(-50%);
+  border-radius: 99px; background: var(--accent); pointer-events: none;
+  left: 0; width: 0;
+}
+.dual-range input[type=range] { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; pointer-events: none; z-index: 1; }
+/* 隐藏每个 range 自带的轨道，只保留拇指；否则后一个 input 的轨道会盖住前一个的拇指 */
+.dual-range input[type=range]::-webkit-slider-runnable-track { background: transparent; border: none; }
+.dual-range input[type=range]::-moz-range-track { background: transparent; border: none; }
+.dual-range input[type=range]::-webkit-slider-thumb { pointer-events: auto; }
+.dual-range input[type=range]::-moz-range-thumb { pointer-events: auto; }
+
+/* 自定义背景 */
+.bg-options { display: grid; gap: 8px; }
+.bg-options[hidden] { display: none; }
+.bg-type-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.bg-pill {
+  position: relative; display: inline-flex; align-items: center; gap: 5px;
+  cursor: pointer; font-size: 11.5px; font-weight: 700; color: var(--ink);
+}
+.bg-pill input[type=radio] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.bg-pill span {
+  padding: 4px 10px; border: 2px solid var(--ink); border-radius: 99px; background: #fff;
+  transition: background .12s, color .12s;
+}
+.bg-pill:hover span { background: var(--paper); }
+.bg-pill input:checked + span { background: var(--ink); color: #fff; }
+.bg-pill input[type=radio]:disabled + span { opacity: .4; cursor: not-allowed; }
+.bg-subrow { display: flex; align-items: center; gap: 8px; }
+.bg-subrow[hidden] { display: none; }
+.bg-subrow-label { font-size: 11.5px; font-weight: 700; color: var(--ink); flex: none; }
+#bg-color {
+  width: 48px; height: 27px; padding: 1px 2px;
+  border: 2px solid var(--ink); border-radius: 6px; background: #fff; cursor: pointer;
+}
+#bg-color:disabled { opacity: .4; cursor: not-allowed; }
+.bg-subrow .btn { padding: 7px 14px; font-size: 12.5px; box-shadow: 2px 2px 0 var(--ink); white-space: nowrap; }
+#bg-image-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 卡片内清除行：提示文案 + 「清空」按钮 */
+.card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.card-foot .hint { margin-top: 0; flex: 1; }
+.card-foot .btn { flex: none; padding: 5px 12px; font-size: 12px; box-shadow: 2px 2px 0 var(--ink); white-space: nowrap; }
+.card-foot .btn[hidden] { display: none; }
+
+.hint { font-size: 11.5px; color: var(--gray); line-height: 1.55; }
+.card-body > .hint { margin-top: 10px; }
+.hint-inline { display: block; font-size: 11px; color: var(--gray); font-weight: 600; margin-top: 1px; }
+#status { font-size: 12px; font-weight: 700; color: var(--red); min-height: 18px; padding: 0 2px; word-break: break-all; }
+#status.ok { color: var(--ink); }
+#status.ok::before { content: "✓ "; }
+.panel-foot { font-size: 11px; color: var(--gray); line-height: 1.6; padding: 0 2px; }
+
+/* ===== 桌面端：左舞台右面板，舞台固定，仅面板滚动 =====
+   需同时满足「够宽」+「精确指针（鼠标/触控板）」；触屏设备（含安卓桌面模式）一律上下布局 */
+@media (min-width: 861px) and (pointer: fine) {
+  .app { flex-direction: row; }
+  .stage-area { flex: 1; min-width: 0; }
+  #stage { flex: 1; height: auto; }
+  .panel { flex: 0 0 392px; border-left: 3px solid var(--ink); padding: 18px 16px 24px; }
+}
+@media (max-width: 400px) {
+  .summary-sub { display: none; }
+}
+</style>
+</head>
+<body>
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <symbol id="icon-reset" viewBox="0 0 24 24">
+    <path d="M20 11a8 8 0 1 1-2.34-5.66L20 7"></path>
+    <path d="M20 3v4h-4"></path>
+  </symbol>
+</svg>
+<div class="app">
+  <section class="stage-area">
+    <div id="stage">
+      <div id="stage-canvas">
+        <canvas id="canvas" width="640" height="480" tabindex="0" role="button" title="点击选择图片文件" aria-label="点击选择图片文件"></canvas>
+        <div id="preview-hint" hidden aria-live="polite">
+          <div>当前为演示动画，可直接导出视频/GIF</div>
+           <div>再添加一份音频用于生成正式口型</div>
+        </div>
+        <div id="drop-hint">
+          <div id="drop-hint-title" class="drop-title">添加2张角色立绘，开始预览</div>
+          <button id="reuse-image-btn" class="btn" type="button" hidden>复用同一张图片</button>
+          <div id="drop-hint-details" class="hint">2张图片：闭嘴+张嘴</div>
+          <div id="drop-hint-extra" class="hint">4张图片：闭嘴+张嘴+闭眼版本</div>
+        </div>
+      </div>
+      <div id="export-progress-wrap" hidden aria-live="polite">
+        <div id="export-progress-label"><span>导出进度</span><span id="export-progress-percent">0%</span></div>
+        <div id="export-progress-row">
+          <progress id="export-progress" max="1" value="0"></progress>
+          <button id="btn-stop-export" class="btn" type="button">停止导出</button>
+        </div>
+      </div>
+    </div>
+    <div class="transport">
+      <button id="btn-seek-play" class="primary" disabled aria-label="播放" title="播放（空格）">▶</button>
+      <span id="t-cur">00:00.0</span>
+      <input type="range" id="seek" min="0" max="1000" value="0" disabled aria-label="播放进度">
+      <span id="t-total">--:--</span>
+      <span id="state-badge">待输入</span>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <header class="panel-head">
+      <div class="title-row">
+        <h1>阿墨的说话小人生成器 <span class="product-acronym">MTAG</span></h1>
+        <span class="v2-badge">v0.3.0</span>
+      </div>
+      <p>两张图片，一段语音，自动生成说话动画 ✧(ᐛ )</p>
+    </header>
+
+    <section class="card actions" aria-label="操作">
+      <div class="card-body">
+        <div class="actions-row" style="margin-bottom:0">
+          <button id="btn-play" class="btn primary grow" disabled>播放</button>
+          <button id="btn-export-toggle" class="btn" type="button" aria-expanded="false" aria-controls="export-body">导出</button>
+          <button id="btn-reanalyze" class="btn" title="重置并清空当前素材" aria-label="重置并清空当前素材" disabled>重置</button>
+        </div>
+        <div class="export-body" id="export-body" hidden>
+          <div class="actions-row" style="margin-bottom:0">
+            <select id="export-mode" title="导出格式" aria-label="导出格式">
+              <option value="webm">WebM 视频</option>
+              <option value="mp4">MP4 视频</option>
+              <option value="gif">GIF 动图</option>
+            </select>
+            <button id="btn-export" class="btn primary grow" disabled>开始导出</button>
+          </div>
+          <div class="switch-list">
+            <label class="check"><span>自定义背景</span><input type="checkbox" id="bg-enabled"></label>
+            <div class="bg-options" id="bg-options" hidden>
+              <div class="bg-type-row" role="radiogroup" aria-label="背景类型">
+                <label class="bg-pill"><input type="radio" name="bg-type" value="green" checked><span>绿幕</span></label>
+                <label class="bg-pill"><input type="radio" name="bg-type" value="white"><span>白色</span></label>
+                <label class="bg-pill"><input type="radio" name="bg-type" value="color"><span>纯色</span></label>
+                <label class="bg-pill"><input type="radio" name="bg-type" value="image"><span>图片</span></label>
+              </div>
+              <div class="bg-subrow" id="bg-color-row" hidden>
+                <label class="bg-subrow-label" for="bg-color">背景颜色</label>
+                <input type="color" id="bg-color" value="#ce6a5a" title="自定义背景颜色" aria-label="自定义背景颜色">
+              </div>
+              <div class="bg-subrow" id="bg-image-row" hidden>
+                <button id="bg-image-btn" class="btn" type="button">选择图片</button>
+                <span id="bg-image-name" class="hint">未选择图片</span>
+              </div>
+            </div>
+            <input type="checkbox" id="export-fast" checked hidden aria-label="快速导出（固定开启）">
+          </div>
+          <div class="export-params">
+            <div class="param"><div class="param-head"><label for="p-fps">帧率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-fps" title="重置帧率" aria-label="重置帧率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-fps" type="number" min="12" max="60" step="1" value="30" inputmode="numeric" aria-label="帧率"></span></label></div><input type="range" id="p-fps" min="12" max="60" step="1" value="30"></div>
+            <div class="param"><div class="param-head"><label for="p-exp-h">导出高度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-exp-h" title="重置导出高度" aria-label="重置导出高度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-exp-h" type="number" min="360" max="1080" step="60" value="720" inputmode="numeric" aria-label="导出高度"></span></label></div><input type="range" id="p-exp-h" min="360" max="1080" step="60" value="720"></div>
+            <div class="param"><div class="param-head"><label for="p-vbitrate">视频码率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-vbitrate" title="重置视频码率" aria-label="重置视频码率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-vbitrate" type="number" min="1" max="16" step="0.5" value="8" inputmode="decimal" aria-label="视频码率"></span></label></div><input type="range" id="p-vbitrate" min="1" max="16" step="0.5" value="8"><div class="hint">越高越清晰、文件越大；<span id="export-size-est">加载音频后显示预估大小</span></div></div>
+            <div class="param" style="margin-bottom:0">
+              <div class="param-label"><span>导出范围</span><span id="export-duration">未加载音频</span></div>
+              <div class="dual-range" id="export-range-slider">
+                <div class="dual-range-track"></div>
+                <div class="dual-range-fill" id="export-range-fill"></div>
+                <input type="range" id="export-range-slider-start" min="0" max="1" step="0.1" value="0" disabled aria-label="导出开始时间滑块">
+                <input type="range" id="export-range-slider-end" min="0" max="1" step="0.1" value="1" disabled aria-label="导出结束时间滑块">
+              </div>
+              <div class="export-range">
+                <label for="export-start">开始（秒）<input id="export-start" type="number" min="0" step="0.1" value="0" disabled aria-label="导出开始时间"></label>
+                <label for="export-end">结束（秒）<input id="export-end" type="number" min="0" step="0.1" value="0" disabled aria-label="导出结束时间"></label>
+              </div>
+              <div class="range-footer"><button id="export-full" class="btn" type="button" disabled>全长</button><span class="hint">滑块左端=起始、右端=结束；视频按帧取整，音频按秒截取</span></div>
+            </div>
+            <p class="hint" style="margin-top:10px">WebM(VP9+alpha) 透明底可进达芬奇/PR；MP4 不支持透明，建议先开背景（白/绿幕）；GIF 仅 10 秒内、无半透明（未开背景时白底），建议 360 高度 + 12~15 帧率控制体积。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <details class="card" open>
+      <summary><span class="step">1</span>角色素材<span class="summary-sub">A/B 必需 · C/D 可选</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <div class="slots-grid">
+          <div class="slot"><div class="slot-thumb" id="slot-a" data-slot="a"><span class="tag">A</span></div><div class="slot-name">闭嘴 <em>必需</em></div></div>
+          <div class="slot"><div class="slot-thumb" id="slot-b" data-slot="b"><span class="tag">B</span></div><div class="slot-name">张嘴 <em>必需</em></div></div>
+          <div class="slot"><div class="slot-thumb" id="slot-c" data-slot="c"><span class="tag">C</span></div><div class="slot-name">闭嘴眨眼</div></div>
+          <div class="slot"><div class="slot-thumb" id="slot-d" data-slot="d"><span class="tag">D</span></div><div class="slot-name">张嘴眨眼</div></div>
+        </div>
+        <div class="card-foot">
+          <p class="hint">无眨眼图时自动用 A/B 代替（不眨眼）；点击缩略图可替换</p>
+          <button id="btn-clear-images" class="btn" type="button" hidden>清空</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="card" open>
+      <summary><span class="step">2</span>音频<span class="summary-sub">wav / mp3 / m4a</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <div class="audio-row" role="button" tabindex="0" aria-label="点击选择音频文件">
+          <div class="slot-thumb" id="slot-audio">🎵</div>
+          <div id="audio-name">拖入或点击选择音频文件</div>
+        </div>
+        <div class="card-foot">
+          <p class="hint">选择的音频只在本地处理，不会上传；支持 WAV / MP3 / M4A 等常见格式</p>
+          <button id="btn-clear-audio" class="btn" type="button" hidden>清空</button>
+        </div>
+        <div id="media-status" hidden data-state="busy" role="status" aria-live="polite">
+          <div class="media-status-head"><span id="media-status-text"></span><span id="media-status-percent"></span></div>
+          <progress id="media-progress" max="1" value="0" aria-label="文件处理进度"></progress>
+        </div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="step">3</span>口型参数<span class="summary-sub">阈值 · 响应 · 交替</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <div class="param"><div class="param-head"><label for="p-threshold">振幅阈值 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-threshold" title="重置振幅阈值" aria-label="重置振幅阈值" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-threshold" type="number" min="0.005" max="0.2" step="0.005" value="0.025" inputmode="decimal" aria-label="振幅阈值"></span></label></div><input type="range" id="p-threshold" min="0.005" max="0.2" step="0.005" value="0.025"><div class="hint">音量超过此值判为「说话」；安静录音 0.01~0.03，嘈杂环境调高</div></div>
+        <div class="param"><div class="param-head"><label for="p-attack">张嘴响应 attack <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-attack" title="重置张嘴响应" aria-label="重置张嘴响应" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-attack" type="number" min="0" max="100" step="5" value="20" inputmode="numeric" aria-label="张嘴响应 attack"></span></label></div><input type="range" id="p-attack" min="0" max="100" step="5" value="20"><div class="hint">超过阈值后多快张嘴（毫秒），越小越灵敏</div></div>
+        <div class="param"><div class="param-head"><label for="p-release">闭嘴保持 release <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-release" title="重置闭嘴保持" aria-label="重置闭嘴保持" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-release" type="number" min="0" max="400" step="10" value="120" inputmode="numeric" aria-label="闭嘴保持 release"></span></label></div><input type="range" id="p-release" min="0" max="400" step="10" value="120"><div class="hint">低于阈值后延迟多久闭嘴（毫秒），防止嘴型快速闪烁</div></div>
+        <label class="check"><span>交替变化</span><input type="checkbox" id="mouth-alternate" checked></label>
+        <p class="hint" style="margin-top:-4px">说话时按设定频率在张嘴 / 闭嘴图之间交替</p>
+        <div class="param" id="mouth-alternate-param"><div class="param-head"><label for="p-alt-freq">切换频率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-alt-freq" title="重置切换频率" aria-label="重置切换频率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-alt-freq" type="number" min="1" max="6" step="0.5" value="4.5" inputmode="decimal" aria-label="切换频率"></span></label></div><input type="range" id="p-alt-freq" min="1" max="6" step="0.5" value="4.5"><div class="hint">交替循环的频率（Hz），越高嘴型变化越快</div></div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="step">4</span>眨眼<span class="summary-sub">间隔 · 时长 · 种子</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <div class="param"><div class="param-head"><label for="p-bmin">间隔下限 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bmin" title="重置间隔下限" aria-label="重置间隔下限" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bmin" type="number" min="0.5" max="8" step="0.5" value="2" inputmode="decimal" aria-label="间隔下限"></span></label></div><input type="range" id="p-bmin" min="0.5" max="8" step="0.5" value="2"></div>
+        <div class="param"><div class="param-head"><label for="p-bmax">间隔上限 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bmax" title="重置间隔上限" aria-label="重置间隔上限" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bmax" type="number" min="1" max="12" step="0.5" value="5" inputmode="decimal" aria-label="间隔上限"></span></label></div><input type="range" id="p-bmax" min="1" max="12" step="0.5" value="5"></div>
+        <div class="param"><div class="param-head"><label for="p-bdur">闭眼时长 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bdur" title="重置闭眼时长" aria-label="重置闭眼时长" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bdur" type="number" min="0.08" max="0.5" step="0.02" value="0.18" inputmode="decimal" aria-label="闭眼时长"></span></label></div><input type="range" id="p-bdur" min="0.08" max="0.5" step="0.02" value="0.18"></div>
+        <div class="param"><div class="param-head"><label for="p-seed">随机种子 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-seed" title="重置随机种子" aria-label="重置随机种子" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-seed" type="number" min="1" max="999" step="1" value="42" inputmode="numeric" aria-label="随机种子"></span></label></div><input type="range" id="p-seed" min="1" max="999" step="1" value="42"><div class="hint">固定种子眨眼时刻可复现</div></div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="step">5</span>附加动效<span class="summary-sub">弹跳 / 摇摆动效</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <label class="check"><span>说话弹跳（squash &amp; stretch）</span><input type="checkbox" id="fx-bounce" checked></label>
+        <div class="param"><div class="param-head"><label for="p-bounce">弹跳强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bounce" title="重置弹跳强度" aria-label="重置弹跳强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bounce" type="number" min="0.01" max="0.2" step="0.01" value="0.03" inputmode="decimal" aria-label="弹跳强度"></span></label></div><input type="range" id="p-bounce" min="0.01" max="0.2" step="0.01" value="0.03"></div>
+        <div class="param"><div class="param-head"><label for="p-bfreq">弹跳频率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bfreq" title="重置弹跳频率" aria-label="重置弹跳频率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bfreq" type="number" min="1" max="8" step="0.5" value="3" inputmode="decimal" aria-label="弹跳频率"></span></label></div><input type="range" id="p-bfreq" min="1" max="8" step="0.5" value="3"></div>
+        <label class="check"><span>说话摇摆（rotate）</span><input type="checkbox" id="fx-wiggle"></label>
+        <div class="param" style="margin-bottom:0"><div class="param-head"><label for="p-wiggle">摇摆强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-wiggle" title="重置摇摆强度" aria-label="重置摇摆强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-wiggle" type="number" min="0.5" max="3" step="0.5" value="1" inputmode="decimal" aria-label="摇摆强度"></span></label></div><input type="range" id="p-wiggle" min="0.5" max="3" step="0.5" value="1"></div>
+      </div>
+    </details>
+
+    <div id="status" role="status"></div>
+    <p class="panel-foot">只装立绘不装音频时，可播放演示口型并直接导出；拖入音频生成正式口型。空格键可播放/暂停。桌面端推荐 Chrome / Edge。</p>
+  </aside>
+</div>
+
+<input type="file" id="file-input" multiple accept="image/*" style="display:none">
+<input type="file" id="audio-file-input" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac" style="display:none">
+<input type="file" id="bg-image-input" accept="image/*" style="display:none">
+
+<script>
+// 导出面板展开/收起
+document.getElementById("btn-export-toggle").addEventListener("click", () => {
+  const body = document.getElementById("export-body");
+  const open = body.hidden;
+  body.hidden = !open;
+  document.getElementById("btn-export-toggle").setAttribute("aria-expanded", String(open));
+});
+</script>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>
