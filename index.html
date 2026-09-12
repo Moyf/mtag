@@ -24,9 +24,11 @@ html, body { height: 100%; }
 body {
   background: var(--paper); color: var(--ink);
   font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  /* 固定视口、文档不可滚：iOS 聚焦输入框时只能滚内部面板，无法上滚整个文档遮挡下半截 */
+  position: fixed; inset: 0;
   overflow: hidden;
 }
-.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+.app { height: 100vh; height: 100dvh; height: var(--app-height, 100vh); display: flex; flex-direction: column; }
 
 /* ===== 舞台区：始终固定，不滚动 ===== */
 .stage-area { flex: 0 0 auto; display: flex; flex-direction: column; min-height: 0; }
@@ -225,11 +227,18 @@ details.card[open] > summary .chev { transform: rotate(90deg); }
   position: absolute; top: 5px; left: 5px; font-size: 9px; font-weight: 800;
   background: var(--ink); color: #fff; border-radius: 4px; padding: 1px 5px;
 }
-.slots-grid .slot-thumb:not(.loaded)::after {
+.slot-thumb:not(.loaded)::after {
   content: "＋"; position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
   color: rgba(20, 20, 20, .42); font-size: 34px; font-weight: 500;
   line-height: 1; pointer-events: none;
+}
+#slot-audio:not(.loaded)::after { font-size: 26px; }
+/* 音频处理中：加号换成旋转圈，选中媒体后的明显等待状态 */
+#slot-audio.busy::after {
+  content: ""; position: absolute; width: 18px; height: 18px; margin: auto; top: 0; right: 0; bottom: 0; left: 0;
+  border: 3px solid rgba(20, 20, 20, .25); border-top-color: var(--ink);
+  border-radius: 50%; animation: slot-spin .8s linear infinite;
 }
 .slot-thumb.loading { border-style: solid; border-color: var(--ink); opacity: .8; cursor: progress; }
 .slot-thumb.loading .tag { opacity: .35; }
@@ -258,7 +267,7 @@ details.card[open] > summary .chev { transform: rotate(90deg); }
   color: var(--ink); background: rgba(255, 255, 255, .88); font-size: 10px; font-weight: 800; border-radius: 8px;
 }
 .audio-row .slot-thumb { width: 56px; flex: none; }
-#audio-name { font-size: 12px; color: var(--gray); font-weight: 600; word-break: break-all; }
+#audio-name { font-size: 12px; color: var(--gray); font-weight: 600; word-break: break-all; flex: 1; min-width: 0; }
 .media-status {
   display: flex; flex-direction: column; gap: 6px; margin-top: 12px;
   padding: 9px 10px; background: #fff; border: 2px solid var(--ink); border-radius: 8px;
@@ -382,6 +391,12 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
 .card-foot .hint { margin-top: 0; flex: 1; }
 .card-foot .btn { flex: none; padding: 5px 12px; font-size: 12px; box-shadow: 2px 2px 0 var(--ink); white-space: nowrap; }
 .card-foot .btn[hidden] { display: none; }
+/* 录音按钮：红圈录音图标，与音频行同行；录音中闪烁红点 */
+.btn-record { flex: none; padding: 10px 16px; font-size: 13px; box-shadow: 2px 2px 0 var(--ink); white-space: nowrap; }
+.btn-record::before { content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 7px; border-radius: 50%; background: var(--red); vertical-align: -1px; }
+.btn-record.recording { color: var(--red); border-color: var(--red); box-shadow: 2px 2px 0 var(--red); }
+.btn-record.recording::before { animation: record-blink 1s steps(1, end) infinite; }
+@keyframes record-blink { 50% { visibility: hidden; } }
 
 .hint { font-size: 11.5px; color: var(--gray); line-height: 1.55; }
 .card-body > .hint { margin-top: 10px; }
@@ -448,7 +463,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
     <header class="panel-head">
       <div class="title-row">
         <h1>阿墨的说话小人生成器 <span class="product-acronym">MTAG</span></h1>
-        <span class="v2-badge">v0.3.0</span>
+        <span class="v2-badge">v0.3.2</span>
       </div>
       <p>两张图片，一段语音，自动生成说话动画 ✧(ᐛ )</p>
     </header>
@@ -469,45 +484,27 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
             </select>
             <button id="btn-export" class="btn primary grow" disabled>开始导出</button>
           </div>
-          <div class="switch-list">
-            <label class="check"><span>自定义背景</span><input type="checkbox" id="bg-enabled"></label>
-            <div class="bg-options" id="bg-options" hidden>
-              <div class="bg-type-row" role="radiogroup" aria-label="背景类型">
-                <label class="bg-pill"><input type="radio" name="bg-type" value="green" checked><span>绿幕</span></label>
-                <label class="bg-pill"><input type="radio" name="bg-type" value="white"><span>白色</span></label>
-                <label class="bg-pill"><input type="radio" name="bg-type" value="color"><span>纯色</span></label>
-                <label class="bg-pill"><input type="radio" name="bg-type" value="image"><span>图片</span></label>
-              </div>
-              <div class="bg-subrow" id="bg-color-row" hidden>
-                <label class="bg-subrow-label" for="bg-color">背景颜色</label>
-                <input type="color" id="bg-color" value="#ce6a5a" title="自定义背景颜色" aria-label="自定义背景颜色">
-              </div>
-              <div class="bg-subrow" id="bg-image-row" hidden>
-                <button id="bg-image-btn" class="btn" type="button">选择图片</button>
-                <span id="bg-image-name" class="hint">未选择图片</span>
-              </div>
-            </div>
-            <input type="checkbox" id="export-fast" checked hidden aria-label="快速导出（固定开启）">
-          </div>
+          <input type="checkbox" id="export-fast" checked hidden aria-label="快速导出（固定开启）">
           <div class="export-params">
             <div class="param"><div class="param-head"><label for="p-fps">帧率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-fps" title="重置帧率" aria-label="重置帧率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-fps" type="number" min="12" max="60" step="1" value="30" inputmode="numeric" aria-label="帧率"></span></label></div><input type="range" id="p-fps" min="12" max="60" step="1" value="30"></div>
             <div class="param"><div class="param-head"><label for="p-exp-h">导出高度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-exp-h" title="重置导出高度" aria-label="重置导出高度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-exp-h" type="number" min="360" max="1080" step="60" value="720" inputmode="numeric" aria-label="导出高度"></span></label></div><input type="range" id="p-exp-h" min="360" max="1080" step="60" value="720"></div>
             <div class="param"><div class="param-head"><label for="p-vbitrate">视频码率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-vbitrate" title="重置视频码率" aria-label="重置视频码率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-vbitrate" type="number" min="1" max="16" step="0.5" value="8" inputmode="decimal" aria-label="视频码率"></span></label></div><input type="range" id="p-vbitrate" min="1" max="16" step="0.5" value="8"><div class="hint">越高越清晰、文件越大；<span id="export-size-est">加载音频后显示预估大小</span></div></div>
+            <div class="param"><div class="param-head"><label for="p-gif-colors">GIF 颜色数 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-gif-colors" title="重置 GIF 颜色数" aria-label="重置 GIF 颜色数" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-gif-colors" type="number" min="8" max="256" step="8" value="256" inputmode="numeric" aria-label="GIF 颜色数"></span></label></div><input type="range" id="p-gif-colors" min="8" max="256" step="8" value="256"><div class="hint">颜色数量越少体积越小、但颜色断层也越明显。</div></div>
             <div class="param" style="margin-bottom:0">
               <div class="param-label"><span>导出范围</span><span id="export-duration">未加载音频</span></div>
               <div class="dual-range" id="export-range-slider">
                 <div class="dual-range-track"></div>
                 <div class="dual-range-fill" id="export-range-fill"></div>
-                <input type="range" id="export-range-slider-start" min="0" max="1" step="0.1" value="0" disabled aria-label="导出开始时间滑块">
-                <input type="range" id="export-range-slider-end" min="0" max="1" step="0.1" value="1" disabled aria-label="导出结束时间滑块">
+<input type="range" id="export-range-slider-start" min="0" max="1" step="any" value="0" disabled aria-label="导出开始时间滑块">
+            <input type="range" id="export-range-slider-end" min="0" max="1" step="any" value="1" disabled aria-label="导出结束时间滑块">
               </div>
               <div class="export-range">
                 <label for="export-start">开始（秒）<input id="export-start" type="number" min="0" step="0.1" value="0" disabled aria-label="导出开始时间"></label>
                 <label for="export-end">结束（秒）<input id="export-end" type="number" min="0" step="0.1" value="0" disabled aria-label="导出结束时间"></label>
               </div>
-              <div class="range-footer"><button id="export-full" class="btn" type="button" disabled>全长</button><span class="hint">滑块左端=起始、右端=结束；视频按帧取整，音频按秒截取</span></div>
+              <div class="range-footer"><button id="export-full" class="btn" type="button" disabled>全长</button><span class="hint">滑块左端为起始时间，右端为结束时间。</span></div>
             </div>
-            <p class="hint" style="margin-top:10px">WebM(VP9+alpha) 透明底可进达芬奇/PR；MP4 不支持透明，建议先开背景（白/绿幕）；GIF 仅 10 秒内、无半透明（未开背景时白底），建议 360 高度 + 12~15 帧率控制体积。</p>
+            <p class="hint" style="margin-top:10px">WebM(VP9+alpha) 透明底可进达芬奇/PR；MP4 不支持透明，选中时自动停用透明背景；GIF 仅 10 秒内、无半透明（自动白底），建议 360 高度 + 12~15 帧率控制体积。</p>
           </div>
         </div>
       </div>
@@ -530,25 +527,64 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
     </details>
 
     <details class="card" open>
-      <summary><span class="step">2</span>音频<span class="summary-sub">wav / mp3 / m4a</span><span class="chev">›</span></summary>
+      <summary><span class="step">2</span>音频<span class="summary-sub">音频或短视频</span><span class="chev">›</span></summary>
       <div class="card-body">
-        <div class="audio-row" role="button" tabindex="0" aria-label="点击选择音频文件">
-          <div class="slot-thumb" id="slot-audio">🎵</div>
-          <div id="audio-name">拖入或点击选择音频文件</div>
+        <div class="audio-row" role="button" tabindex="0" aria-label="点击选择音频或视频文件">
+          <div class="slot-thumb" id="slot-audio"></div>
+          <div id="audio-name">拖入或点击选择音频或视频文件</div>
+          <button id="btn-record-audio" class="btn btn-record" type="button" aria-pressed="false">录音</button>
         </div>
         <div class="card-foot">
-          <p class="hint">选择的音频只在本地处理，不会上传；支持 WAV / MP3 / M4A 等常见格式</p>
+          <p class="hint">只在本地处理，不会上传；支持 WAV / MP3 / M4A 等音频，也可选择视频提取音轨，或用麦克风直接录音</p>
           <button id="btn-clear-audio" class="btn" type="button" hidden>清空</button>
         </div>
-        <div id="media-status" hidden data-state="busy" role="status" aria-live="polite">
+        <div id="media-status" class="media-status" hidden data-state="busy" role="status" aria-live="polite">
           <div class="media-status-head"><span id="media-status-text"></span><span id="media-status-percent"></span></div>
           <progress id="media-progress" max="1" value="0" aria-label="文件处理进度"></progress>
+          <button id="btn-start-media" class="btn" type="button" hidden>开始提取音轨</button>
+          <button id="btn-cancel-media" class="btn" type="button" hidden>取消提取</button>
         </div>
+        <p id="ios-silent-hint" class="hint" hidden>iPhone 侧边静音拨片打开时试听会无声（录音与导出不受影响），请关闭静音后再试听</p>
       </div>
     </details>
 
     <details class="card">
-      <summary><span class="step">3</span>口型参数<span class="summary-sub">阈值 · 响应 · 交替</span><span class="chev">›</span></summary>
+      <summary><span class="step">3</span>附加动效<span class="summary-sub">弹跳 / 摇摆动效</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <label class="check"><span>说话弹跳（squash &amp; stretch）</span><input type="checkbox" id="fx-bounce" checked></label>
+        <div class="param"><div class="param-head"><label for="p-bounce">弹跳强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bounce" title="重置弹跳强度" aria-label="重置弹跳强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bounce" type="number" min="0.01" max="0.2" step="0.01" value="0.03" inputmode="decimal" aria-label="弹跳强度"></span></label></div><input type="range" id="p-bounce" min="0.01" max="0.2" step="0.01" value="0.03"></div>
+        <div class="param"><div class="param-head"><label for="p-bfreq">弹跳频率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bfreq" title="重置弹跳频率" aria-label="重置弹跳频率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bfreq" type="number" min="1" max="8" step="0.5" value="3" inputmode="decimal" aria-label="弹跳频率"></span></label></div><input type="range" id="p-bfreq" min="1" max="8" step="0.5" value="3"></div>
+        <label class="check"><span>说话摇摆（rotate）</span><input type="checkbox" id="fx-wiggle"></label>
+        <div class="param" style="margin-bottom:0"><div class="param-head"><label for="p-wiggle">摇摆强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-wiggle" title="重置摇摆强度" aria-label="重置摇摆强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-wiggle" type="number" min="0.5" max="3" step="0.5" value="1" inputmode="decimal" aria-label="摇摆强度"></span></label></div><input type="range" id="p-wiggle" min="0.5" max="3" step="0.5" value="1"></div>
+      </div>
+    </details>
+
+    <details class="card" open>
+      <summary><span class="step">4</span>背景<span class="summary-sub">白色 / 绿幕 / 纯色 / 图片 / 透明</span><span class="chev">›</span></summary>
+      <div class="card-body">
+        <div class="bg-options" id="bg-options">
+          <div class="bg-type-row" role="radiogroup" aria-label="背景类型">
+            <label class="bg-pill"><input type="radio" name="bg-type" value="white"><span>白色</span></label>
+            <label class="bg-pill"><input type="radio" name="bg-type" value="green"><span>绿幕</span></label>
+            <label class="bg-pill"><input type="radio" name="bg-type" value="color"><span>纯色</span></label>
+            <label class="bg-pill"><input type="radio" name="bg-type" value="image"><span>图片</span></label>
+            <label class="bg-pill"><input type="radio" name="bg-type" value="transparent" checked><span>透明</span></label>
+          </div>
+          <div class="bg-subrow" id="bg-color-row" hidden>
+            <label class="bg-subrow-label" for="bg-color">背景颜色</label>
+            <input type="color" id="bg-color" value="#ce6a5a" title="自定义背景颜色" aria-label="自定义背景颜色">
+          </div>
+          <div class="bg-subrow" id="bg-image-row" hidden>
+            <button id="bg-image-btn" class="btn" type="button">选择图片</button>
+            <span id="bg-image-name" class="hint">未选择图片</span>
+          </div>
+        </div>
+        <p class="hint" style="margin-top:10px">透明底仅 WebM 支持；选 MP4 导出时会自动停用透明（GIF 自动白底）。</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="step">5</span>口型参数<span class="summary-sub">阈值 · 响应 · 交替</span><span class="chev">›</span></summary>
       <div class="card-body">
         <div class="param"><div class="param-head"><label for="p-threshold">振幅阈值 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-threshold" title="重置振幅阈值" aria-label="重置振幅阈值" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-threshold" type="number" min="0.005" max="0.2" step="0.005" value="0.025" inputmode="decimal" aria-label="振幅阈值"></span></label></div><input type="range" id="p-threshold" min="0.005" max="0.2" step="0.005" value="0.025"><div class="hint">音量超过此值判为「说话」；安静录音 0.01~0.03，嘈杂环境调高</div></div>
         <div class="param"><div class="param-head"><label for="p-attack">张嘴响应 attack <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-attack" title="重置张嘴响应" aria-label="重置张嘴响应" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-attack" type="number" min="0" max="100" step="5" value="20" inputmode="numeric" aria-label="张嘴响应 attack"></span></label></div><input type="range" id="p-attack" min="0" max="100" step="5" value="20"><div class="hint">超过阈值后多快张嘴（毫秒），越小越灵敏</div></div>
@@ -560,23 +596,12 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
     </details>
 
     <details class="card">
-      <summary><span class="step">4</span>眨眼<span class="summary-sub">间隔 · 时长 · 种子</span><span class="chev">›</span></summary>
+      <summary><span class="step">6</span>眨眼<span class="summary-sub">间隔 · 时长 · 种子</span><span class="chev">›</span></summary>
       <div class="card-body">
         <div class="param"><div class="param-head"><label for="p-bmin">间隔下限 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bmin" title="重置间隔下限" aria-label="重置间隔下限" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bmin" type="number" min="0.5" max="8" step="0.5" value="2" inputmode="decimal" aria-label="间隔下限"></span></label></div><input type="range" id="p-bmin" min="0.5" max="8" step="0.5" value="2"></div>
         <div class="param"><div class="param-head"><label for="p-bmax">间隔上限 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bmax" title="重置间隔上限" aria-label="重置间隔上限" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bmax" type="number" min="1" max="12" step="0.5" value="5" inputmode="decimal" aria-label="间隔上限"></span></label></div><input type="range" id="p-bmax" min="1" max="12" step="0.5" value="5"></div>
         <div class="param"><div class="param-head"><label for="p-bdur">闭眼时长 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bdur" title="重置闭眼时长" aria-label="重置闭眼时长" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bdur" type="number" min="0.08" max="0.5" step="0.02" value="0.18" inputmode="decimal" aria-label="闭眼时长"></span></label></div><input type="range" id="p-bdur" min="0.08" max="0.5" step="0.02" value="0.18"></div>
         <div class="param"><div class="param-head"><label for="p-seed">随机种子 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-seed" title="重置随机种子" aria-label="重置随机种子" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-seed" type="number" min="1" max="999" step="1" value="42" inputmode="numeric" aria-label="随机种子"></span></label></div><input type="range" id="p-seed" min="1" max="999" step="1" value="42"><div class="hint">固定种子眨眼时刻可复现</div></div>
-      </div>
-    </details>
-
-    <details class="card">
-      <summary><span class="step">5</span>附加动效<span class="summary-sub">弹跳 / 摇摆动效</span><span class="chev">›</span></summary>
-      <div class="card-body">
-        <label class="check"><span>说话弹跳（squash &amp; stretch）</span><input type="checkbox" id="fx-bounce" checked></label>
-        <div class="param"><div class="param-head"><label for="p-bounce">弹跳强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bounce" title="重置弹跳强度" aria-label="重置弹跳强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bounce" type="number" min="0.01" max="0.2" step="0.01" value="0.03" inputmode="decimal" aria-label="弹跳强度"></span></label></div><input type="range" id="p-bounce" min="0.01" max="0.2" step="0.01" value="0.03"></div>
-        <div class="param"><div class="param-head"><label for="p-bfreq">弹跳频率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bfreq" title="重置弹跳频率" aria-label="重置弹跳频率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bfreq" type="number" min="1" max="8" step="0.5" value="3" inputmode="decimal" aria-label="弹跳频率"></span></label></div><input type="range" id="p-bfreq" min="1" max="8" step="0.5" value="3"></div>
-        <label class="check"><span>说话摇摆（rotate）</span><input type="checkbox" id="fx-wiggle"></label>
-        <div class="param" style="margin-bottom:0"><div class="param-head"><label for="p-wiggle">摇摆强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-wiggle" title="重置摇摆强度" aria-label="重置摇摆强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-wiggle" type="number" min="0.5" max="3" step="0.5" value="1" inputmode="decimal" aria-label="摇摆强度"></span></label></div><input type="range" id="p-wiggle" min="0.5" max="3" step="0.5" value="1"></div>
       </div>
     </details>
 
@@ -586,7 +611,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
 </div>
 
 <input type="file" id="file-input" multiple accept="image/*" style="display:none">
-<input type="file" id="audio-file-input" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac" style="display:none">
+<input type="file" id="audio-file-input" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.mov,.mp4,.m4v,.webm" style="display:none">
 <input type="file" id="bg-image-input" accept="image/*" style="display:none">
 
 <script>
@@ -598,6 +623,7 @@ document.getElementById("btn-export-toggle").addEventListener("click", () => {
   document.getElementById("btn-export-toggle").setAttribute("aria-expanded", String(open));
 });
 </script>
+<script type="module">import * as mb from "./vendor.mediabunny.mjs"; window.__mtagMediabunny = mb;</script>
 <script type="module" src="app.mjs"></script>
 </body>
 </html>

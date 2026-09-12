@@ -13,13 +13,15 @@ const AUDIO_BITRATE = 96_000;
 
 /**
  * 离屏快速导出（浏览器端调用，Node 无 WebCodecs 时会抛错）
- * opts: { imgs, analysis, fps, width, height, audioBuffer, audioStart, audioEnd,
+ * opts: { imgs, analysis, fps, width, height, imageWidth, imageHeight, padding,
+ *         audioBuffer, audioStart, audioEnd,
  *         frameStart, frameEnd, format: "webm"|"mp4",
  *         bg: { color?: string, image?: HTMLImageElement|null }, signal, onProgress }
  */
 export async function exportFast(opts) {
   const { imgs, analysis, audioBuffer, format, bg, onProgress } = opts;
   const fps = opts.fps, W = opts.width, H = opts.height;
+  const imageWidth = Number(opts.imageWidth), imageHeight = Number(opts.imageHeight), padding = Number(opts.padding);
   const frameStart = Number.isInteger(opts.frameStart) ? opts.frameStart : 0;
   const frameEnd = Number.isInteger(opts.frameEnd) ? opts.frameEnd : analysis.nframes;
   const n = frameEnd - frameStart;
@@ -73,7 +75,7 @@ export async function exportFast(opts) {
 
   for (let i = 0; i < n; i++) {
     throwIfAborted(opts.signal);
-    renderFrame(ctx, imgs, analysis, frameStart + i, bg, W, H);
+    renderFrame(ctx, imgs, analysis, frameStart + i, bg, W, H, imageWidth, imageHeight, padding);
     await videoSource.add(i * frameDur, frameDur);
     if (onProgress && (i % 30 === 0 || i === n - 1)) onProgress(i + 1, n);
     if (i % 90 === 0) await new Promise(r => setTimeout(r, 0)); // UI 喘息
@@ -125,8 +127,8 @@ function paintBackground(ctx, bg, W, H) {
   }
 }
 
-/** 与 app.mjs drawFrame 同构的渲染（无 DOM 依赖） */
-export function renderFrame(ctx, imgs, analysis, f, bg, W, H) {
+/** 与 app.mjs drawFrame 同构的渲染（无 DOM 依赖）；imageWidth/imageHeight/padding 为 canvasLayout 输出，未传时回退按画布 cover 缩放 */
+export function renderFrame(ctx, imgs, analysis, f, bg, W, H, imageWidth, imageHeight, padding) {
   const A = analysis;
   ctx.clearRect(0, 0, W, H);
   paintBackground(ctx, bg, W, H);
@@ -143,10 +145,12 @@ export function renderFrame(ctx, imgs, analysis, f, bg, W, H) {
   if (A.wiggle) { rot = A.wiggle[f] || 0; }
 
   if (img) {
-    const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
-    const w = img.naturalWidth * s, h = img.naturalHeight * s;
+    const hasLayout = imageWidth > 0 && imageHeight > 0 && padding >= 0;
+    const s = hasLayout ? 1 : Math.min(W / img.naturalWidth, H / img.naturalHeight);
+    const w = hasLayout ? imageWidth : img.naturalWidth * s;
+    const h = hasLayout ? imageHeight : img.naturalHeight * s;
     ctx.save();
-    ctx.translate(W / 2, H);
+    ctx.translate(W / 2, hasLayout ? padding + imageHeight : H);
     ctx.rotate(rot * Math.PI / 180);
     ctx.scale(sx, sy);
     ctx.drawImage(img, -w / 2, -h, w, h);

@@ -53,6 +53,39 @@ export function gifFrameDelays(count, fps) {
   return delays;
 }
 
+// ---------- 画布布局 ----------
+
+/**
+ * 计算图片与画布的安全边距。
+ * 图片四周至少预留图片高度 10% 的空间，并按当前控件上限为弹跳/摇摆留足余量。
+ */
+export function canvasLayout(img, targetH) {
+  const naturalWidth = Number(img?.naturalWidth);
+  const naturalHeight = Number(img?.naturalHeight);
+  if (!(naturalWidth > 0 && naturalHeight > 0)) {
+    throw new RangeError("图片尺寸无效");
+  }
+  const imageHeight = Math.max(1, Math.round(Number(targetH) || 0));
+  const imageWidth = Math.max(1, Math.round(naturalWidth * imageHeight / naturalHeight));
+  const maxBounce = 0.2;
+  const maxWiggle = 3 * Math.PI / 180;
+  const halfWidth = imageWidth / 2;
+  const maxHeight = imageHeight * (1 + maxBounce);
+  const topOverflow = halfWidth * Math.sin(maxWiggle) + maxHeight * Math.cos(maxWiggle) - imageHeight;
+  const sideOverflow = halfWidth * Math.cos(maxWiggle) + maxHeight * Math.sin(maxWiggle) - halfWidth;
+  // 弹跳只从底部锚点向上拉伸，图片底边无需留白；仅向上/左右拓展安全边距，
+  // 摇摆旋转的底角下沉（半宽×sin3°，约十几像素）维持画布底边裁切，与旧版行为一致。
+  const motionPadding = Math.max(0, topOverflow, sideOverflow);
+  const padding = Math.max(1, Math.ceil(Math.max(imageHeight * 0.1, motionPadding)));
+  return {
+    width: imageWidth + padding * 2,
+    height: imageHeight + padding,
+    imageWidth,
+    imageHeight,
+    padding,
+  };
+}
+
 // ---------- 振幅分析 ----------
 
 /** 按视频帧分块求 RMS。samples: Float32Array(-1..1)，返回每帧 RMS 数组 */

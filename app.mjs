@@ -3,7 +3,7 @@
  * 素材载入 → AudioContext 解码 → core 分析（RMS/阈值/眨眼/动效）→ canvas 逐帧渲染
  * 导出：默认 WebCodecs 快速编码，MediaRecorder 实时录制兜底；支持范围、进度与中止
  */
-import { frameRMS, thresholdStates, alternateMouthStates, resolveExportRange, scheduleBlinks, mulberry32, talkBounce, talkWiggle, audioBufferToMono, mobileVideoSizeLimitMessage, mobileVideoDurationLimitMessage, GIF_MAX_DURATION_SEC } from "./lip-sync-core.mjs";
+import { frameRMS, thresholdStates, alternateMouthStates, resolveExportRange, scheduleBlinks, mulberry32, talkBounce, talkWiggle, audioBufferToMono, mobileVideoSizeLimitMessage, mobileVideoDurationLimitMessage, GIF_MAX_DURATION_SEC, canvasLayout } from "./lip-sync-core.mjs";
 import { exportFast } from "./export-fast.mjs";
 import { exportGif } from "./export-gif.mjs";
 
@@ -21,18 +21,59 @@ const state = {
   exporting: false, exportController: null,
   mediaProcessing: false, mediaController: null, mediaKind: null,
   pendingMediaFile: null,
+  recording: false,   // 麦克风录音进行中
   demo: false, demoClockStart: 0,   // 无音频时的演示预览（预生成说话节奏，可直接导出）
   bgImage: null, bgImageName: "",   // 自定义背景图片
 };
 
 const canvas = $("canvas"), ctx = canvas.getContext("2d");
 
+// 本体用 <audio> 元素播放，不受 iOS 静音拨片影响；minitool 构建把播放层换成
+// AudioContext 并把此标记替换为 false，用于决定是否展示静音拨片提示。
+const USES_MEDIA_ELEMENT_PLAYBACK = true;
+
+let pickerFeedbackToken = 0;
+let pickerFeedbackTimer = 0;
+
+function pickerIdleStatusText() {
+  return state.demo ? "演示预览" : state.analysis ? "基于音频生成" : "待输入";
+}
+
+/** 缩短媒体文件名用于展示：去掉 URL 查询串，超长时保留首尾（含扩展名）。 */
+function shortFileName(name, max = 28) {
+  const clean = String(name || "").split("?")[0].trim() || "未命名";
+  if (clean.length <= max) return clean;
+  const tail = clean.slice(-Math.max(6, Math.floor(max / 4)));
+  return `${clean.slice(0, max - 1 - tail.length)}…${tail}`;
+}
+
 function openFilePicker(target = "") {
-  if (state.exporting || state.mediaProcessing || state.pendingMediaFile) return;
+  // 待提取（pendingMediaFile）状态也允许重新选择：新选择会直接取代旧的视频。
+  if (state.exporting || state.mediaProcessing) return;
+  if (state.recording && target === "audio") {
+    setStatus("正在录音，请先停止录音", false);
+    return;
+  }
   const fileInput = target === "audio" ? $("audio-file-input") : $("file-input");
   if (!fileInput) return;
   fileInput.dataset.target = target;
+  // 先清空上次的值，规避 iOS 容器里选择同一路径时不触发 change 的问题。
+  fileInput.value = "";
   fileInput.click();
+  // iOS 容器在系统面板确认后还要拷贝文件才触发 change；给出提示，取消或超时后恢复。
+  const token = ++pickerFeedbackToken;
+  window.clearTimeout(pickerFeedbackTimer);
+  setStatus("已打开文件选择器，确认后开始处理，请耐心等待片刻…", true);
+  fileInput.addEventListener("cancel", () => {
+    if (token !== pickerFeedbackToken) return;
+    window.clearTimeout(pickerFeedbackTimer);
+    setStatus(pickerIdleStatusText(), true);
+  }, { once: true });
+  pickerFeedbackTimer = window.setTimeout(() => {
+    if (token === pickerFeedbackToken && !state.mediaProcessing && !state.pendingMediaFile) {
+      setStatus(pickerIdleStatusText(), true);
+    }
+  }, 20000);
 }
 
 // 画布本身也是文件入口；键盘用户可用 Enter/Space 打开选择器
@@ -78,6 +119,7 @@ function params() {
     fxWiggle: $("fx-wiggle").checked,
     wiggleAmp: +$("p-wiggle").value,
     videoBitrateMbps: +$("p-vbitrate").value,
+    gifColors: +$("p-gif-colors").value,
   };
 }
 
@@ -94,6 +136,9 @@ function handleFileInputChange(input, target = "") {
   // File 对象已被复制到数组，不受清空 input.value 影响。
   input.value = "";
   input.blur();
+  // change 已触发，让「已打开文件选择器」提示失效。
+  pickerFeedbackToken++;
+  window.clearTimeout(pickerFeedbackTimer);
   handleFiles(files, target);
 }
 
@@ -151,29 +196,33 @@ audioRow.addEventListener("click", () => {
 });
 audioRow.addEventListener("keydown", (e) => {
   if (e.key !== "Enter" && e.key !== " ") return;
+  if (e.target !== audioRow) return;   // 焦点在行内录音按钮上时交给原生激活
   e.preventDefault();
   e.stopPropagation();
   audioRow.click();
 });
 
 function handleFiles(files, explicitTarget = undefined) {
-  if (state.exporting || state.mediaProcessing || state.pendingMediaFile) return;
+  // 待提取（pendingMediaFile）时也放行：重新选择会取代待提取的视频。
+  if (state.exporting || state.mediaProcessing) return;
   const target = explicitTarget === undefined ? $("file-input").dataset.target : explicitTarget;
   $("file-input").dataset.target = "";
   let imageTarget = target && target !== "audio" ? target : null;
   const reservedImageSlots = new Set(Object.keys(state.imgs).filter((slot) => state.imgs[slot]));
   for (const f of Array.from(files || [])) {
     if (isAudioFile(f)) {
-      if (state.mediaProcessing) {
-        setStatus("已有媒体正在处理，请等待完成", false);
+      if (state.mediaProcessing || state.recording) {
+        setStatus(state.recording ? "正在录音，请先停止录音" : "已有媒体正在处理，请等待完成", false);
         continue;
       }
       void loadAudio(f);
     }
     else if (isVideoFile(f)) {
-      const message = "当前版本暂不支持视频，请选择 WAV / MP3 / M4A 音频文件";
-      setMediaStatus(message, null, "error");
-      setStatus(message, false);
+      if (state.mediaProcessing || state.recording) {
+        setStatus(state.recording ? "正在录音，请先停止录音" : "已有媒体正在处理，请等待完成", false);
+        continue;
+      }
+      void loadAudioFromVideo(f);
     }
     else if (String(f?.type || "").toLowerCase().startsWith("image/") || /\.(png|webp|gif|jpe?g)$/i.test(String(f?.name || ""))) {
       const slot = imageTarget || nextEmptySlot(reservedImageSlots);
@@ -225,6 +274,22 @@ function isIosLikeBrowser() {
     || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
+// iOS Safari 的 Web Audio 默认跑在 ambient 会话类别，会被侧边静音拨片静音
+// （<audio> 元素不受影响）。Audio Session API（Safari 16.4+）把类别提到 playback
+// 即可豁免静音拨片；但 playback 类别下 getUserMedia 会被直接拒绝，
+// 因此麦克风采集前必须先 demote 回 auto，采集结束后再恢复。
+function promoteAudioSession() {
+  try {
+    if ("audioSession" in navigator) navigator.audioSession.type = "playback";
+  } catch (_) { /* 不支持或值无效时保持默认 */ }
+}
+
+function demoteAudioSession() {
+  try {
+    if ("audioSession" in navigator) navigator.audioSession.type = "auto";
+  } catch (_) { /* 忽略 */ }
+}
+
 function videoPlaybackError(userGesture = false) {
   return new Error(userGesture
     ? "浏览器阻止了播放，请再次点击“开始提取音轨”重试"
@@ -232,6 +297,7 @@ function videoPlaybackError(userGesture = false) {
 }
 
 function queueVideoAudio(file) {
+  const name = shortFileName(file.name);
   state.audioLoadId++;
   state.mediaKind = "video";
   state.pendingMediaFile = file;
@@ -239,10 +305,10 @@ function queueVideoAudio(file) {
   state.audioBuf = null;
   state.mono = null;
   state.analysis = null;
-  state.audioName = file.name;
+  state.audioName = name;
   state.demo = false;
   state.exportRangeInitialized = false;
-  $("audio-name").textContent = `${file.name}（已选择）`;
+  $("audio-name").textContent = `${name}（已选择）`;
   $("slot-audio").classList.remove("loaded");
   setMediaStatus("视频已选择，请点击“开始提取音轨”", null, "pending");
   checkReady();
@@ -279,7 +345,7 @@ function loadImage(file, target) {
   imageLoadingCount++;
   el.classList.add("loading");
   el.setAttribute("aria-busy", "true");
-  setStatus(`正在读取图片 ${file.name}…`, true);
+  setStatus(`正在读取图片 ${shortFileName(file.name)}…`, true);
   img.onload = () => {
     if (assetRevision !== state.assetRevision) {
       URL.revokeObjectURL(url);
@@ -320,6 +386,7 @@ function reuseImageForMouth() {
 }
 
 function beginAudioLoad(file, loadingText, mediaKind = "audio") {
+  const name = shortFileName(file.name);
   const controller = new AbortController();
   const load = {
     audioLoadId: ++state.audioLoadId,
@@ -335,12 +402,12 @@ function beginAudioLoad(file, loadingText, mediaKind = "audio") {
   state.audioBuf = null;
   state.mono = null;
   state.analysis = null;
-  state.audioName = file.name;
+  state.audioName = name;
   state.demo = false;
   state.exportRangeInitialized = false;
-  $("audio-name").textContent = `${file.name}（${loadingText}…）`;
+  $("audio-name").textContent = `${name}（${loadingText}…）`;
   $("slot-audio").classList.remove("loaded");
-  setMediaStatus(`正在${loadingText}…`, null, "busy");
+    setMediaStatus(`正在${loadingText}，请耐心等待片刻…`, null, "busy");
   checkReady();
   return load;
 }
@@ -351,14 +418,15 @@ function isCurrentAudioLoad(load) {
 
 function commitAudioBuffer(file, audioBuf, load, sourceLabel) {
   if (!isCurrentAudioLoad(load)) return false;
+  const name = shortFileName(file.name);
   state.mediaProcessing = false;
   state.audioBuf = audioBuf;
   state.mono = audioBufferToMono(audioBuf);
   state.sr = audioBuf.sampleRate;
-  state.audioName = file.name;
-  $("audio-name").textContent = `${file.name}（${sourceLabel} · ${audioBuf.duration.toFixed(1)}s / ${audioBuf.sampleRate}Hz）`;
+  state.audioName = name;
+    $("audio-name").textContent = `${name}（${sourceLabel} · ${audioBuf.duration.toFixed(1)}s）`;
   $("slot-audio").classList.add("loaded");
-  setMediaStatus(`已载入${sourceLabel}：${file.name}`, 1, "ok");
+  setMediaStatus(`已载入${sourceLabel}：${name}`, 1, "ok");
   analyze();
   return true;
 }
@@ -401,9 +469,16 @@ async function loadAudio(file) {
   const load = beginAudioLoad(file, "读取音频", "audio");
   let ac = null;
   try {
+    // 先让出主线程，确保「正在读取」的 busy 状态先绘制，再开始大文件读取。
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    if (!isCurrentAudioLoad(load)) return;
+    let lastReadStep = -1;
     const buf = await readFileAsArrayBuffer(file, (ratio) => {
       if (!isCurrentAudioLoad(load)) return;
-      setMediaStatus(`正在读取音频… ${file.name}`, Math.min(.45, Math.max(.03, ratio * .45)), "busy");
+      const step = Math.floor(ratio * 50);   // 每 2% 刷新一次，避免进度事件刷屏拖慢老设备
+      if (step === lastReadStep) return;
+      lastReadStep = step;
+      setMediaStatus(`正在读取音频… ${shortFileName(file.name)}`, Math.min(.45, Math.max(.03, ratio * .45)), "busy");
     }, load.signal);
     if (!isCurrentAudioLoad(load)) return;
     throwIfMediaStopped(load.signal);
@@ -419,7 +494,7 @@ async function loadAudio(file) {
     state.mediaProcessing = false;
     if (isMediaStopped(e)) {
       state.audioName = "";
-      $("audio-name").textContent = "拖入或点击选择音频文件";
+      $("audio-name").textContent = "拖入或点击选择音频或视频文件";
       $("slot-audio").classList.remove("loaded");
       setMediaStatus("已取消音频读取", null, "pending");
       setStatus("已取消音频读取", false);
@@ -445,6 +520,160 @@ function mediaStoppedError() {
   const error = new Error("媒体处理已取消");
   error.name = "AbortError";
   return error;
+}
+
+/**
+ * 视频文件 → 口型分析用音频：
+ * 1) 首选直接解码容器音轨（MP4/MOV + AAC 等格式可离线快速解码，无需播放视频）；
+ * 2) 直接解码失败且浏览器支持 MediaRecorder 时，退回「开始提取音轨」的实时提取流程；
+ * 3) 实时提取也不可用时给出明确警告。
+ */
+/**
+ * iOS WebKit 的 decodeAudioData 会被新 iPhone 视频的 APAC 等额外音轨卡死；
+ * 用 mediabunny 纯拷贝重封装出仅含受支持音轨的 MP4（不解码、不重编码）后重试解码。
+ * mediabunny 以独立 classic script 注入（window.__mtagMediabunny），老容器解析失败时跳过本路径。
+ */
+async function remuxVideoAudioForDecode(file, signal) {
+  const mb = window.__mtagMediabunny;
+  if (!mb || !mb.Input || !mb.Conversion) throw new Error("当前环境没有可用的视频重封装模块");
+  throwIfMediaStopped(signal);
+  const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(file) });
+  const output = new mb.Output({ format: new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
+  // 只保留 AAC 音轨：丢弃视频轨；APAC 等 WebKit 不支持的额外音轨一并丢弃。
+  const conversion = await mb.Conversion.init({
+    input, output,
+    video: { discard: true },
+    audio: (track) => (track.codec === "aac" ? {} : { discard: true }),
+  });
+  if (conversion.isValid === false) throw new Error("视频里没有可提取的受支持音轨");
+  await waitForMediaPromise(conversion.execute(), signal, 120000, "视频重封装超时，请换用更短的视频或改用音频文件");
+  const buffer = output.target?.buffer;
+  if (!buffer || !buffer.byteLength) throw new Error("重封装后没有可用音轨");
+  return buffer;
+}
+
+async function loadAudioFromVideo(file) {
+  const sizeLimitMessage = getMobileVideoSizeLimitMessage(file);
+  if (sizeLimitMessage) {
+    $("audio-name").textContent = "视频超出移动端限制，请先裁剪视频";
+    $("slot-audio").classList.remove("loaded");
+    setMediaStatus(sizeLimitMessage, null, "error");
+    setStatus(sizeLimitMessage, false);
+    return;
+  }
+  const load = beginAudioLoad(file, "读取视频音轨", "video");
+  let ac = null;
+  let decodeError = null;
+  let decodeTicker = 0;
+  const stopDecodeTicker = () => {
+    if (decodeTicker) {
+      window.clearInterval(decodeTicker);
+      decodeTicker = 0;
+    }
+  };
+  const cancelVideoLoad = () => {
+    state.mediaProcessing = false;
+    if (state.mediaController === load.controller) state.mediaController = null;
+    state.audioName = "";
+    $("audio-name").textContent = "拖入或点击选择音频或视频文件";
+    $("slot-audio").classList.remove("loaded");
+    setMediaStatus("已取消视频读取", null, "pending");
+    setStatus("已取消视频读取", false);
+    checkReady();
+  };
+  try {
+    // 先让出主线程，确保「正在读取」的 busy 状态先绘制，再开始大文件读取。
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    if (!isCurrentAudioLoad(load)) return;
+    let lastReadStep = -1;
+    const buf = await readFileAsArrayBuffer(file, (ratio) => {
+      if (!isCurrentAudioLoad(load)) return;
+      const step = Math.floor(ratio * 50);   // 每 2% 刷新一次，避免进度事件刷屏拖慢老设备
+      if (step === lastReadStep) return;
+      lastReadStep = step;
+      setMediaStatus(`正在读取视频… ${shortFileName(file.name)}`, Math.min(.45, Math.max(.03, ratio * .45)), "busy");
+    }, load.signal);
+    if (!isCurrentAudioLoad(load)) return;
+    throwIfMediaStopped(load.signal);
+    const decodeStartedAt = Date.now();
+    setMediaStatus("正在解码视频音轨… 0 秒", null, "busy");
+    decodeTicker = window.setInterval(() => {
+      if (!isCurrentAudioLoad(load)) return;
+      const seconds = Math.round((Date.now() - decodeStartedAt) / 1000);
+      setMediaStatus(`正在解码视频音轨… 已 ${seconds} 秒`, null, "busy");
+    }, 500);
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) throw new Error("当前浏览器不支持音频解码");
+    ac = new AudioContextCtor();
+    const audioBuf = await waitForMediaPromise(
+      ac.decodeAudioData(buf), load.signal, 60000,
+      "视频音轨解码超时，请换用更短的视频或改用音频文件",
+    );
+    throwIfMediaStopped(load.signal);
+    commitAudioBuffer(file, audioBuf, load, "视频音轨");
+    return;
+  } catch (e) {
+    if (!isCurrentAudioLoad(load)) return;
+    if (isMediaStopped(e)) {
+      cancelVideoLoad();
+      return;
+    }
+    decodeError = e;
+  } finally {
+    stopDecodeTicker();
+    await ac?.close?.();
+    ac = null;
+    // 注意：此处不重置 mediaProcessing——直接解码失败后还要进入重封装重试。
+  }
+  // 直接解码失败：iOS WebKit 会被 iPhone 视频的 APAC 额外音轨卡死。
+  // 先尝试 mediabunny 纯拷贝重封装（剥掉未知轨道）后重试解码，失败再转实时提取。
+  if (window.__mtagMediabunny) {
+    try {
+      throwIfMediaStopped(load.signal);
+      setMediaStatus("正在重封装视频音轨…", null, "busy");
+      const remuxedBuf = await remuxVideoAudioForDecode(file, load.signal);
+      if (!isCurrentAudioLoad(load)) return;
+      throwIfMediaStopped(load.signal);
+      setMediaStatus("重封装完成，正在解码音轨…", null, "busy");
+      const RemuxAudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!RemuxAudioContextCtor) throw new Error("当前浏览器不支持音频解码");
+      ac = new RemuxAudioContextCtor();
+      const audioBuf = await waitForMediaPromise(
+        ac.decodeAudioData(remuxedBuf), load.signal, 60000,
+        "视频音轨解码超时，请换用更短的视频或改用音频文件",
+      );
+      throwIfMediaStopped(load.signal);
+      commitAudioBuffer(file, audioBuf, load, "视频音轨");
+      return;
+    } catch (e) {
+      if (!isCurrentAudioLoad(load)) return;
+      if (isMediaStopped(e)) {
+        cancelVideoLoad();
+        return;
+      }
+      if (errorMessage(e) !== errorMessage(decodeError)) {
+        setStatus(`重封装解码仍失败：${errorMessage(e)}`, false);
+      }
+    } finally {
+      await ac?.close?.();
+      ac = null;
+    }
+  }
+  // 全部失败：重置处理状态，能实时提取就转入手动提取流程，否则警告用户。
+  state.mediaProcessing = false;
+  if (state.mediaController === load.controller) state.mediaController = null;
+  if (typeof MediaRecorder === "function") {
+    queueVideoAudio(file);
+    setMediaStatus("无法直接解码该视频，可点击「开始提取音轨」用播放方式重试", null, "pending");
+    setStatus(`无法直接解码该视频音轨：${errorMessage(decodeError)}`, false);
+  } else {
+    $("audio-name").textContent = "视频音轨提取失败，请换用音频或视频文件";
+    $("slot-audio").classList.remove("loaded");
+    const message = `无法从该视频提取音频：${errorMessage(decodeError)}`;
+    setMediaStatus(message, null, "error");
+    setStatus(message, false);
+  }
+  checkReady();
 }
 
 function isMediaStopped(error) {
@@ -824,6 +1053,183 @@ async function loadVideoAudio(file, userGesture = false) {
   }
 }
 
+// ---------- 麦克风录音 ----------
+const RECORDING_MAX_MS = 5 * 60 * 1000;   // 单段录音上限，避免长时间录音占用过多内存
+let micRecorder = null;
+let micStream = null;
+let micChunks = [];
+let micMime = "";
+let micAutoStopTimer = 0;
+let micTicker = 0;
+let micStartedAt = 0;
+
+function recorderSupported() {
+  return Boolean(navigator.mediaDevices?.getUserMedia && typeof MediaRecorder === "function");
+}
+
+function updateRecordButton() {
+  const button = $("btn-record-audio");
+  if (!button) return;
+  button.hidden = !recorderSupported();
+  button.classList.toggle("recording", state.recording);
+  button.textContent = state.recording ? "停止录音" : "录音";
+  button.setAttribute("aria-pressed", String(state.recording));
+  button.disabled = !state.recording && (state.exporting || state.mediaProcessing);
+}
+
+function pickRecorderMimeType() {
+  if (typeof MediaRecorder.isTypeSupported !== "function") return "";
+  for (const type of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]) {
+    try {
+      if (MediaRecorder.isTypeSupported(type)) return type;
+    } catch (_) { /* 尝试下一种格式 */ }
+  }
+  return "";
+}
+
+function recordingFileExtension(mimeType) {
+  if (/mp4|m4a|aac/i.test(mimeType)) return "m4a";
+  if (/ogg/i.test(mimeType)) return "ogg";
+  return "webm";
+}
+
+function recordingFileName() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `录音-${stamp}.${recordingFileExtension(micMime)}`;
+}
+
+function clearMicTimers() {
+  if (micAutoStopTimer) { window.clearTimeout(micAutoStopTimer); micAutoStopTimer = 0; }
+  if (micTicker) { window.clearInterval(micTicker); micTicker = 0; }
+}
+
+function releaseMicStream() {
+  micStream?.getTracks().forEach((track) => track.stop());
+  micStream = null;
+}
+
+function updateRecordingStatus() {
+  const elapsed = Date.now() - micStartedAt;
+  setMediaStatus(`正在录音… ${Math.floor(elapsed / 1000)} 秒（上限 5 分钟）`, Math.min(1, elapsed / RECORDING_MAX_MS), "busy");
+}
+
+async function startRecording() {
+  if (state.recording || state.exporting || state.mediaProcessing) return;
+  if (!recorderSupported()) {
+    setMediaStatus("当前环境不支持麦克风录音", null, "error");
+    setStatus("当前环境不支持麦克风录音", false);
+    return;
+  }
+  try {
+    setMediaStatus("正在请求麦克风权限…", null, "busy");
+    if (state.playing) pausePlayback();   // 预览声会串进麦克风，录音前先停掉
+    demoteAudioSession();   // playback 会话类别与麦克风采集互斥，必须先切回 auto
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // 等待授权期间状态可能已变化（如开始导出），此时立即释放麦克风。
+    if (state.exporting || state.mediaProcessing || state.recording) {
+      stream.getTracks().forEach((track) => track.stop());
+      promoteAudioSession();
+      clearMediaStatus();
+      checkReady();
+      return;
+    }
+    micStream = stream;
+    micChunks = [];
+    micMime = pickRecorderMimeType();
+    micRecorder = new MediaRecorder(stream, micMime ? { mimeType: micMime } : undefined);
+    micRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) micChunks.push(event.data);
+    };
+    micRecorder.onerror = () => abortRecording("录音出错，已中止本次录音");
+    micRecorder.onstop = finishRecording;
+    micRecorder.start(1000);   // 每秒收集一次分片，异常中断时也能保留已录内容
+    state.recording = true;
+    micStartedAt = Date.now();
+    micAutoStopTimer = window.setTimeout(stopRecording, RECORDING_MAX_MS);
+    micTicker = window.setInterval(updateRecordingStatus, 250);
+    updateRecordingStatus();
+    checkReady();
+  } catch (e) {
+    clearMicTimers();
+    releaseMicStream();
+    promoteAudioSession();
+    micRecorder = null;
+    micChunks = [];
+    state.recording = false;
+    checkReady();
+    const message = e?.name === "NotAllowedError" || e?.name === "SecurityError"
+      ? "麦克风权限被拒绝，请在系统或浏览器设置中允许后重试"
+      : e?.name === "NotFoundError"
+        ? "未检测到可用麦克风"
+        : `无法开始录音：${errorMessage(e)}`;
+    setMediaStatus(message, null, "error");
+    setStatus(message, false);
+  }
+}
+
+function stopRecording() {
+  if (!state.recording || !micRecorder) return;
+  clearMicTimers();
+  // onstop → finishRecording 负责收尾并载入音频。
+  try {
+    if (micRecorder.state !== "inactive") micRecorder.stop();
+  } catch (_) {
+    finishRecording();
+  }
+}
+
+function abortRecording(message) {
+  clearMicTimers();
+  const recorder = micRecorder;
+  micRecorder = null;
+  micChunks = [];
+  state.recording = false;
+  releaseMicStream();
+  promoteAudioSession();
+  if (recorder) {
+    recorder.ondataavailable = null;
+    recorder.onerror = null;
+    recorder.onstop = null;
+    try {
+      if (recorder.state !== "inactive") recorder.stop();
+    } catch (_) { /* 已停止 */ }
+  }
+  checkReady();
+  setMediaStatus(message, null, "error");
+  setStatus(message, false);
+}
+
+function finishRecording() {
+  clearMicTimers();
+  const chunks = micChunks;
+  const mimeType = micRecorder?.mimeType || micMime || "audio/webm";
+  micRecorder = null;
+  micChunks = [];
+  state.recording = false;
+  releaseMicStream();
+  promoteAudioSession();
+  checkReady();
+  if (!chunks.length) {
+    setMediaStatus("录音内容为空，请再录一次", null, "error");
+    setStatus("录音内容为空，请再录一次", false);
+    return;
+  }
+  const file = new File([new Blob(chunks, { type: mimeType.split(";")[0] })], recordingFileName(), { type: mimeType.split(";")[0] });
+  // 录音产物走统一的音频载入管线：解码 → 分析 → 状态展示。
+  handleFiles([file], "audio");
+}
+
+$("btn-record-audio").addEventListener("click", (event) => {
+  event.stopPropagation();   // 按钮在音频行内，避免冒泡触发行的选择器
+  if (state.recording) {
+    stopRecording();
+    return;
+  }
+  void startRecording();
+});
+
 // ---------- 分析 ----------
 function analyze() {
   const p = params();
@@ -860,7 +1266,7 @@ function checkReady() {
   const ready = Boolean(hasImgs && state.analysis);   // 可导出（正式分析或演示动画）
   const playable = hasImgs && Boolean(state.analysis || !state.mono); // 可播放（无音频走演示）
   const mediaPending = Boolean(state.pendingMediaFile);
-  const busy = state.exporting || state.mediaProcessing || mediaPending;
+  const busy = state.exporting || state.mediaProcessing || state.recording || mediaPending;
   const rangeReady = Boolean(updateExportRangeUi());
   $("btn-play").disabled = !playable || busy;
   $("btn-seek-play").disabled = !playable || busy;
@@ -871,9 +1277,14 @@ function checkReady() {
   $("btn-reanalyze").disabled = !hasMaterials || state.exporting;
   $("btn-export-toggle").disabled = !hasMaterials || busy;
   $("seek").disabled = !state.analysis || busy;
-  const fileSelectionDisabled = state.exporting || state.mediaProcessing || mediaPending;
+  const fileSelectionDisabled = state.exporting || state.mediaProcessing;
   $("canvas").setAttribute("aria-disabled", String(fileSelectionDisabled));
-  $(".audio-row")?.setAttribute("aria-disabled", String(fileSelectionDisabled));
+  // 音频行内含「停止录音」按钮，不能整行标 aria-disabled（会把停止按钮也标记为不可用）；
+  // 录音中的选择拦截由 openFilePicker / handleFiles 的状态守卫承担。
+  // 选中媒体后的明显等待状态：读取/解码/提取期间缩略图加号换成旋转圈。
+  $("slot-audio").classList.toggle("busy", state.mediaProcessing);
+  // 音频缩略图图标：视频音轨 🎬、纯音频/录音 🎵；未载入时清空由加号占位。
+  $("slot-audio").textContent = state.audioBuf ? (state.mediaKind === "video" ? "🎬" : "🎵") : "";
   for (const slot of document.querySelectorAll(".slots-grid .slot-thumb")) {
     slot.setAttribute("aria-disabled", String(fileSelectionDisabled));
   }
@@ -882,8 +1293,23 @@ function checkReady() {
   updateBusyUi();
   updatePlaybackUi();
   updateAlternateUi();
+  updateRecordButton();
   updateClearButtonsUi();
   updateMediaStartButton();
+  updateIosSilentHint();
+  updateFxUi();
+}
+
+/** 老 iOS（<16.4，无 Audio Session API）的 AudioContext 试听会被静音拨片静音，
+ *  且网页无法读取拨片状态，只能在 iOS 设备上提示；本体 <audio> 播放不受影响。 */
+function updateIosSilentHint() {
+  const hint = $("ios-silent-hint");
+  if (!hint) return;
+  const hasAudio = Boolean(state.audioName || state.audioBuf || state.mono || state.pendingMediaFile);
+  hint.hidden = USES_MEDIA_ELEMENT_PLAYBACK
+    || !isIosLikeBrowser()
+    || "audioSession" in navigator
+    || !hasAudio;
 }
 
 /** 素材卡片内的「清空」按钮：图片 / 音频各自独立显示与清空 */
@@ -897,7 +1323,7 @@ function updateClearButtonsUi() {
   imagesButton.hidden = !hasImages;
   imagesButton.disabled = state.exporting;
   audioButton.hidden = !hasAudioActivity;
-  audioButton.disabled = state.exporting;
+  audioButton.disabled = state.exporting || state.recording;
 }
 
 /** 只清空图片：有音频时保留口型分析，重选图片后直接复用 */
@@ -936,6 +1362,10 @@ function clearImages() {
 /** 只清空音频：进行中的读取/提取一并取消，图片与图片相关的设置保留 */
 function clearAudio() {
   if (state.exporting) return;
+  if (state.recording) {
+    setStatus("正在录音，请先停止录音", false);
+    return;
+  }
   state.mediaController?.abort();
   state.mediaController = null;
   state.mediaKind = null;
@@ -951,8 +1381,12 @@ function clearAudio() {
   state.demo = false;
   state.exportRangeInitialized = false;
   $("slot-audio").classList.remove("loaded");
-  $("audio-name").textContent = "拖入或点击选择音频文件";
+  $("audio-name").textContent = "拖入或点击选择音频或视频文件";
   clearMediaStatus();
+  // 播放条恢复初始状态：总时长、当前时间与滑块归零。
+  $("t-total").textContent = "--:--";
+  $("t-cur").textContent = "00:00.0";
+  $("seek").value = "0";
   $("export-start").value = "0";
   $("export-end").value = "0";
   $("audio-file-input").value = "";
@@ -1007,13 +1441,12 @@ function currentImage(f) {
 
 /** 读取「自定义背景」开关与背景类型，返回绘制描述；关闭或图片未就绪时返回 null（透明） */
 function backgroundStyle() {
-  if (!$("bg-enabled").checked) return null;
-  const type = document.querySelector('input[name="bg-type"]:checked')?.value || "green";
+  const type = document.querySelector('input[name="bg-type"]:checked')?.value || "transparent";
   if (type === "white") return { color: "#ffffff" };
   if (type === "green") return { color: "#00b140" };
   if (type === "color") return { color: $("bg-color").value || "#ce6a5a" };
   if (type === "image") return state.bgImage ? { image: state.bgImage } : null;
-  return null;
+  return null;   // transparent
 }
 
 /** 绘制背景：纯色填充或图片按 cover 方式铺满画布 */
@@ -1038,14 +1471,12 @@ function drawFrame(f) {
   const A = state.analysis;
   const img = currentImage(f) || state.imgs.a;
   if (!img) return;
-  // 画布尺寸跟随图片与导出高度
-  const targetH = +$("p-exp-h").value;
-  const scale = targetH / img.naturalHeight;
-  const w = Math.round(img.naturalWidth * scale), h = targetH;
-  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  // 画布比图片大一圈，给弹跳/摇摆留下安全空间。
+  const { width, height, imageWidth, imageHeight, padding } = canvasLayout(img, +$("p-exp-h").value);
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
 
-  ctx.clearRect(0, 0, w, h);
-  paintBackground(backgroundStyle(), w, h);
+  ctx.clearRect(0, 0, width, height);
+  paintBackground(backgroundStyle(), width, height);
 
   let sx = 1, sy = 1, rot = 0;
   if (A) {
@@ -1053,10 +1484,10 @@ function drawFrame(f) {
     if (A.wiggle) { rot = A.wiggle[f] || 0; }
   }
   ctx.save();
-  ctx.translate(w / 2, h);
+  ctx.translate(width / 2, padding + imageHeight);
   ctx.rotate(rot * Math.PI / 180);
   ctx.scale(sx, sy);
-  ctx.drawImage(img, -w / 2, -h, w, h);
+  ctx.drawImage(img, -imageWidth / 2, -imageHeight, imageWidth, imageHeight);
   ctx.restore();
 }
 
@@ -1080,7 +1511,24 @@ function formatExportRange(range) {
 }
 
 function errorMessage(error) {
-  return String(error?.message || error || "未知错误").replace(/\s+/g, " ").slice(0, 160);
+  // 桥接/原生层可能 reject 无 message 的普通对象（如 {code, errMsg}），
+  // 按常见字段取值，取不到就 JSON 序列化，绝不让状态栏出现 [object Object]。
+  const compact = (text) => String(text).replace(/\s+/g, " ").trim().slice(0, 160);
+  if (error === null || error === undefined || error === "") return "未知错误";
+  if (typeof error === "string") return compact(error);
+  if (typeof error === "object") {
+    const candidates = [error.message, error.errMsg, error.msg, error.errorMessage, error.reason?.message, error.reason];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) return compact(candidate);
+    }
+    if (typeof error.name === "string" && error.name && error.name !== "Error") return compact(error.name);
+    try {
+      const json = JSON.stringify(error);
+      if (json && json !== "{}" && json !== "[]") return compact(json);
+    } catch (_) { /* 循环引用等序列化失败时走兜底 */ }
+  }
+  const text = String(error);
+  return !text.trim() || text === "[object Object]" ? "未知错误（详情见控制台）" : compact(text);
 }
 
 function exportStoppedError() {
@@ -1234,7 +1682,7 @@ function updateBusyUi() {
   $("btn-stop-export").disabled = !state.exporting || stopping;
   $("btn-stop-export").textContent = stopping ? "正在停止…" : "停止导出";
   for (const id of [
-    "export-mode", "export-fast", "bg-enabled", "bg-color", "bg-image-btn",
+    "export-mode", "export-fast", "bg-color", "bg-image-btn",
     "export-range-slider-start", "export-range-slider-end",
     "p-threshold", "n-threshold",
     "p-attack", "n-attack", "p-release", "n-release", "mouth-alternate",
@@ -1242,11 +1690,14 @@ function updateBusyUi() {
     "p-bdur", "n-bdur", "p-seed", "n-seed", "fx-bounce", "p-bounce",
     "n-bounce", "p-bfreq", "n-bfreq", "fx-wiggle", "p-wiggle", "n-wiggle",
     "p-fps", "n-fps", "p-exp-h", "n-exp-h", "p-vbitrate", "n-vbitrate",
+    "p-gif-colors", "n-gif-colors",
   ]) {
     const element = $(id);
     if (element) element.disabled = busy;
   }
-  for (const radio of document.querySelectorAll('input[name="bg-type"]')) radio.disabled = busy;
+  for (const radio of document.querySelectorAll('input[name="bg-type"]')) {
+    radio.disabled = busy || (radio.value === "transparent" && $("export-mode").value === "mp4");
+  }
   for (const button of document.querySelectorAll(".param-reset")) button.disabled = busy;
 }
 
@@ -1402,6 +1853,10 @@ function resetPlayback() {
 
 function clearMaterials() {
   if (state.exporting) return;
+  if (state.recording) {
+    setStatus("正在录音，请先停止录音", false);
+    return;
+  }
   state.mediaController?.abort();
   state.mediaController = null;
   state.mediaKind = null;
@@ -1432,8 +1887,12 @@ function clearMaterials() {
   state.demo = false;
   state.exportRangeInitialized = false;
   $("slot-audio").classList.remove("loaded");
-  $("audio-name").textContent = "拖入或点击选择音频文件";
+  $("audio-name").textContent = "拖入或点击选择音频或视频文件";
   clearMediaStatus();
+  // 播放条恢复初始状态：总时长、当前时间与滑块归零。
+  $("t-total").textContent = "--:--";
+  $("t-cur").textContent = "00:00.0";
+  $("seek").value = "0";
   $("export-start").value = "0";
   $("export-end").value = "0";
   const fileInput = $("file-input");
@@ -1530,6 +1989,44 @@ window.addEventListener("keydown", (e) => {
   void togglePlay();
 });
 
+// ---------- 移动端键盘视口适配 ----------
+// iOS 弹出键盘时布局视口不收缩，键盘会盖住页面下半截；把可视高度同步到 --app-height
+// （.app 用它定高），并在聚焦输入框后等键盘动画结束再把输入框滚进可视区。
+function syncAppHeight() {
+  const vv = window.visualViewport;
+  const height = vv ? vv.height : window.innerHeight;
+  if (height > 0) document.documentElement.style.setProperty("--app-height", Math.round(height) + "px");
+}
+
+function revealFocusedField(field) {
+  // 等键盘动画（可视视口收缩）结束后再处理，否则按收缩前的高度定位仍会被遮挡
+  window.setTimeout(() => {
+    if (document.activeElement !== field) return;
+    const vv = window.visualViewport;
+    // 仅当 iOS 真把文档上滚了才复位，避免多余滚动引起闪烁
+    if (vv && vv.offsetTop > 0) window.scrollTo(0, 0);
+    // 输入框已完整落在可视区内就不滚动，避免无谓跳动
+    const viewportHeight = vv ? vv.height : window.innerHeight;
+    const rect = field.getBoundingClientRect();
+    if (rect.top >= 0 && rect.bottom <= viewportHeight - 8) return;
+    try {
+      field.scrollIntoView({ block: "center" });
+    } catch (_) { /* 老内核不支持参数对象时忽略 */ }
+  }, 260);
+}
+
+window.addEventListener("resize", syncAppHeight);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", syncAppHeight);
+  window.visualViewport.addEventListener("scroll", syncAppHeight);
+}
+document.addEventListener("focusin", (e) => {
+  const field = e.target;
+  if (!(field instanceof HTMLElement) || !field.matches("input, textarea, select")) return;
+  revealFocusedField(field);
+});
+syncAppHeight();
+
 // ---------- 导出 ----------
 $("btn-export").addEventListener("click", () => { void exportVideo(); });
 $("btn-stop-export").addEventListener("click", stopExport);
@@ -1591,6 +2088,7 @@ async function exportVideo() {
       await exportVideoRealtime(format, exportRange, signal);
     }
   } catch (e) {
+    console.error("导出失败：", e);
     setStatus(isExportStopped(e) || signal.aborted ? "已停止导出" : "导出失败：" + errorMessage(e), false);
   } finally {
     state.exporting = false;
@@ -1611,10 +2109,7 @@ function formatLabel(format, bg) {
 async function exportVideoFast(format, exportRange, signal) {
   const A = state.analysis;
   const p = params();
-  const targetH = +$("p-exp-h").value;
-  const imgA = state.imgs.a;
-  const scale = targetH / imgA.naturalHeight;
-  const W = Math.round(imgA.naturalWidth * scale), H = targetH;
+  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value);
   const frameCount = exportRange.endFrame - exportRange.startFrame;
   const bg = backgroundStyle();
   throwIfExportStopped(signal);
@@ -1624,6 +2119,7 @@ async function exportVideoFast(format, exportRange, signal) {
   try {
     const blob = await exportFast({
       imgs: state.imgs, analysis: A, fps: p.fps, width: W, height: H,
+      imageWidth, imageHeight, padding,
       audioBuffer: state.audioBuf,
       audioStart: exportRange.start, audioEnd: exportRange.end,
       frameStart: exportRange.startFrame, frameEnd: exportRange.endFrame,
@@ -1651,10 +2147,7 @@ async function exportVideoFast(format, exportRange, signal) {
 async function exportVideoGif(exportRange, signal) {
   const A = state.analysis;
   const p = params();
-  const targetH = +$("p-exp-h").value;
-  const imgA = state.imgs.a;
-  const scale = targetH / imgA.naturalHeight;
-  const W = Math.round(imgA.naturalWidth * scale), H = targetH;
+  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value);
   const frameCount = exportRange.endFrame - exportRange.startFrame;
   // GIF 只有 1 位透明，抗锯齿边缘会出毛边；未开启背景时统一用白底。
   const bg = backgroundStyle() || { color: "#ffffff" };
@@ -1665,8 +2158,10 @@ async function exportVideoGif(exportRange, signal) {
   try {
     const blob = await exportGif({
       imgs: state.imgs, analysis: A, fps: p.fps, width: W, height: H,
+      imageWidth, imageHeight, padding,
       frameStart: exportRange.startFrame, frameEnd: exportRange.endFrame,
       bg,
+      colors: p.gifColors,
       signal,
       onProgress: (f, n) => {
         setExportProgress(f, n);
@@ -1772,7 +2267,9 @@ async function exportVideoRealtime(format, exportRange, signal) {
     await done;
     throwIfExportStopped(signal);
 
-    const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
+    // Blob type 必须是裸 mime：rec.mimeType 常带 codecs 后缀（如 video/mp4;codecs=…），
+    // 拼进 data:uri 会变成 data:video/mp4;codecs=…;base64,…，原生侧 data-uri 解析失败。
+    const blob = new Blob(chunks, { type: (rec.mimeType || "video/webm").split(";")[0] });
     downloadBlob(blob, format);
     setExportProgress(1, 1);
     setStatus("导出完成：" + (blob.size / 1048576).toFixed(1) + " MB " + (blob.type.includes("mp4") ? "MP4" : "WebM") + "，" + formatExportRange(exportRange) + (bg ? "（含背景）" : "（VP9 透明，达芬奇/PR 直用）"), true);
@@ -1805,7 +2302,7 @@ const rangeBindings = [
   ["p-alt-freq", "n-alt-freq"], ["p-bmin", "n-bmin"], ["p-bmax", "n-bmax"],
   ["p-bdur", "n-bdur"], ["p-seed", "n-seed"], ["p-bounce", "n-bounce"],
   ["p-bfreq", "n-bfreq"], ["p-wiggle", "n-wiggle"], ["p-fps", "n-fps"],
-  ["p-exp-h", "n-exp-h"], ["p-vbitrate", "n-vbitrate"],
+  ["p-exp-h", "n-exp-h"], ["p-vbitrate", "n-vbitrate"], ["p-gif-colors", "n-gif-colors"],
 ];
 const rangeNumberIds = new Map(rangeBindings);
 const reanalyzeParams = new Set([
@@ -1828,6 +2325,7 @@ const defaultRangeValues = Object.freeze({
   "p-fps": 30,
   "p-exp-h": 720,
   "p-vbitrate": 8,
+  "p-gif-colors": 256,
 });
 
 function normalizeRangeValue(range, raw) {
@@ -2012,11 +2510,15 @@ function onExportRangeSliderInput(which) {
 $("export-range-slider-start")?.addEventListener("input", () => onExportRangeSliderInput("start"));
 $("export-range-slider-end")?.addEventListener("input", () => onExportRangeSliderInput("end"));
 
-// 导出格式切换会改变范围/大小校验口径（如 GIF 10 秒上限）
+// 导出格式切换会改变范围/大小校验口径（如 GIF 10 秒上限），并联动背景透明可用性
 $("export-mode").addEventListener("change", () => {
+  applyFormatBackgroundRules();
+  updateFormatParamsUi();
   updateExportRangeUi();
   checkReady();
 });
+applyFormatBackgroundRules();
+updateFormatParamsUi();
 
 function updateAlternateUi() {
   const enabled = $("mouth-alternate").checked;
@@ -2025,13 +2527,29 @@ function updateAlternateUi() {
   $("n-alt-freq").disabled = !enabled || state.exporting;
 }
 
+/** 附加动效：只显示已开启开关对应的参数行（弹跳 / 摇摆各自的强度、频率） */
+function updateFxUi() {
+  const bounceOn = $("fx-bounce").checked;
+  const wiggleOn = $("fx-wiggle").checked;
+  for (const id of ["p-bounce", "p-bfreq"]) {
+    const row = $(id)?.closest(".param");
+    if (row) row.hidden = !bounceOn;
+  }
+  const wiggleRow = $("p-wiggle")?.closest(".param");
+  if (wiggleRow) wiggleRow.hidden = !wiggleOn;
+}
+
 $("mouth-alternate").addEventListener("change", () => {
   updateAlternateUi();
   commitParameter("mouth-alternate");
 });
 for (const id of ["fx-bounce", "fx-wiggle"]) {
-  $(id).addEventListener("change", () => commitParameter(id));
+  $(id).addEventListener("change", () => {
+    commitParameter(id);
+    updateFxUi();
+  });
 }
+updateFxUi();
 for (const button of document.querySelectorAll(".param-reset")) {
   button.addEventListener("click", (event) => {
     event.preventDefault();
@@ -2040,18 +2558,38 @@ for (const button of document.querySelectorAll(".param-reset")) {
 }
 $("btn-reanalyze").addEventListener("click", clearMaterials);
 
-// ---------- 自定义背景 ----------
+// ---------- 背景 ----------
 function updateBackgroundUi() {
-  const type = document.querySelector('input[name="bg-type"]:checked')?.value || "green";
+  const type = document.querySelector('input[name="bg-type"]:checked')?.value || "transparent";
   $("bg-color-row").hidden = type !== "color";
   $("bg-image-row").hidden = type !== "image";
   refreshPreviewFrame();
 }
 
-$("bg-enabled").addEventListener("change", () => {
-  $("bg-options").hidden = !$("bg-enabled").checked;
-  refreshPreviewFrame();
-});
+// MP4 不支持透明：选中 MP4 时禁用「透明」背景，已选透明则自动切回白色
+function applyFormatBackgroundRules() {
+  const transparent = document.querySelector('input[name="bg-type"][value="transparent"]');
+  if (!transparent) return;
+  const mp4 = $("export-mode").value === "mp4";
+  transparent.disabled = mp4;
+  if (mp4 && transparent.checked) {
+    const white = document.querySelector('input[name="bg-type"][value="white"]');
+    if (white) {
+      white.checked = true;
+      updateBackgroundUi();
+    }
+  }
+}
+
+/** GIF 无码率概念：切到 GIF 时隐藏「视频码率」，改为显示「GIF 颜色数」；其余格式反之 */
+function updateFormatParamsUi() {
+  const isGif = $("export-mode").value === "gif";
+  const bitrateRow = $("p-vbitrate")?.closest(".param");
+  if (bitrateRow) bitrateRow.hidden = isGif;
+  const colorsRow = $("p-gif-colors")?.closest(".param");
+  if (colorsRow) colorsRow.hidden = !isGif;
+}
+
 for (const radio of document.querySelectorAll('input[name="bg-type"]')) {
   radio.addEventListener("change", () => {
     if (radio.checked && radio.value === "image" && !state.bgImage) {
@@ -2094,7 +2632,7 @@ function updateMediaStartButton() {
   const pending = isVideo && Boolean(state.pendingMediaFile);
   const processing = isVideo && state.mediaProcessing;
   button.hidden = !pending;
-  button.disabled = !pending || state.exporting || state.mediaProcessing;
+  button.disabled = !pending || state.exporting || state.mediaProcessing || state.recording;
   cancelButton.hidden = !processing;
   cancelButton.disabled = !processing || !state.mediaController || state.mediaController.signal.aborted;
   cancelButton.textContent = state.mediaController?.signal?.aborted ? "正在取消…" : "取消提取";
@@ -2102,7 +2640,7 @@ function updateMediaStartButton() {
 
 function startPendingMedia() {
   const file = state.pendingMediaFile;
-  if (!file || state.exporting || state.mediaProcessing) return;
+  if (!file || state.exporting || state.mediaProcessing || state.recording) return;
   state.pendingMediaFile = null;
   updateMediaStartButton();
   // 该调用发生在按钮点击回调中，loadVideoAudio 会在首次 await 前调用 video.play()。

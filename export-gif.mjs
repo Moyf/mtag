@@ -2,8 +2,8 @@
  * export-gif.mjs — GIF 导出：gifenc 逐帧量化编码（纯 JS，无需 WebCodecs）
  * 每帧离屏渲染 → Wu 量化 256 色 → LZW 编码；体积与耗时随帧数线性增长，
  * 由调用方（app.mjs）保证范围不超过 GIF_MAX_DURATION_SEC。
- * opts: { imgs, analysis, fps, width, height, frameStart, frameEnd,
- *         bg: { color?, image? }, signal, onProgress }
+ * opts: { imgs, analysis, fps, width, height, imageWidth, imageHeight, padding,
+ *         frameStart, frameEnd, bg: { color?, image? }, signal, onProgress }
  */
 import { GIFEncoder, quantize, applyPalette } from "./vendor.gifenc.mjs";
 import { renderFrame } from "./export-fast.mjs";
@@ -12,6 +12,7 @@ import { gifFrameDelays } from "./lip-sync-core.mjs";
 export async function exportGif(opts) {
   const { imgs, analysis, bg, onProgress } = opts;
   const fps = opts.fps, W = opts.width, H = opts.height;
+  const imageWidth = Number(opts.imageWidth), imageHeight = Number(opts.imageHeight), padding = Number(opts.padding);
   const frameStart = Number.isInteger(opts.frameStart) ? opts.frameStart : 0;
   const frameEnd = Number.isInteger(opts.frameEnd) ? opts.frameEnd : analysis.nframes;
   const n = frameEnd - frameStart;
@@ -28,12 +29,14 @@ export async function exportGif(opts) {
 
   const gif = GIFEncoder();
   const delays = gifFrameDelays(n, fps);
+  // GIF 质量旋钮：调色板颜色数（8 ~ 256），越少体积越小、色带越明显。
+  const colors = Math.min(256, Math.max(8, Math.round(Number(opts.colors) || 256)));
 
   for (let i = 0; i < n; i++) {
     throwIfAborted(opts.signal);
-    renderFrame(ctx, imgs, analysis, frameStart + i, bg, W, H);
+    renderFrame(ctx, imgs, analysis, frameStart + i, bg, W, H, imageWidth, imageHeight, padding);
     const { data } = ctx.getImageData(0, 0, W, H);
-    const palette = quantize(data, 256);
+    const palette = quantize(data, colors);
     const index = applyPalette(data, palette);
     gif.writeFrame(index, W, H, { palette, delay: delays[i] });
     if (onProgress && (i % 5 === 0 || i === n - 1)) onProgress(i + 1, n);
