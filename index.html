@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#f4f2ea">
+<link rel="icon" type="image/png" sizes="512x512" href="./assets/logo.png">
+<link rel="apple-touch-icon" href="./assets/logo.png">
 <!-- Project name: MTAG — Moy's Talking Avatar Generator -->
 <title>阿墨的说话小人生成器 MTAG</title>
 <style>
@@ -50,6 +52,28 @@ body {
   background: rgba(255, 255, 255, .9); padding: 7px 10px; border-radius: 8px;
 }
 #preview-hint[hidden] { display: none; }
+#sample-image-action-hint,
+#drop-hint.incomplete #drop-hint-title {
+  position: absolute; top: 0; left: 50%; z-index: 2;
+  transform: translateX(-50%);
+  width: max-content; max-width: calc(100% - 32px);
+  margin-top: 1em; padding: 1em;
+  color: var(--accent); font-size: 1.5em; line-height: 1.3;
+  font-weight: 800; text-align: center; white-space: nowrap; pointer-events: none;
+  background: rgba(255, 255, 255, .78); border-radius: 8px;
+  box-shadow: 0 1px 8px rgba(20, 20, 20, .12);
+  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  animation: sample-image-action-float 1.8s ease-in-out infinite;
+}
+#sample-image-action-hint[hidden] { display: none; }
+@keyframes sample-image-action-float {
+  0%, 100% { transform: translate(-50%, 0); }
+  50% { transform: translate(-50%, -6px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #sample-image-action-hint,
+  #drop-hint.incomplete #drop-hint-title { animation: none; }
+}
 #drop-hint {
   position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 5px; text-align: center;
@@ -413,6 +437,8 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
   .stage-area { flex: 1; min-width: 0; }
   #stage { flex: 1; height: auto; }
   .panel { flex: 0 0 392px; border-left: 3px solid var(--ink); padding: 18px 16px 24px; }
+  #sample-image-action-hint,
+  #drop-hint.incomplete #drop-hint-title { font-size: 3em; }
 }
 @media (max-width: 400px) {
   .summary-sub { display: none; }
@@ -432,8 +458,11 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
       <div id="stage-canvas">
         <canvas id="canvas" width="640" height="480" tabindex="0" role="button" title="点击选择图片文件" aria-label="点击选择图片文件"></canvas>
         <div id="preview-hint" hidden aria-live="polite">
-          <div>当前为演示动画，可直接导出视频/GIF</div>
-           <div>再添加一份音频用于生成正式口型</div>
+          <div id="demo-hint">当前为演示动画，可直接导出视频/GIF<br>再添加一份音频用于生成正式口型</div>
+          <div id="sample-resource-hint" hidden>当前为示例资源，请选择自己的图片</div>
+        </div>
+        <div id="sample-image-action-hint" hidden aria-hidden="true">
+          <div>↓ 点击画布选择自己的图片 ↓</div>
         </div>
         <div id="drop-hint">
           <div id="drop-hint-title" class="drop-title">添加2张角色立绘，开始预览</div>
@@ -463,7 +492,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
     <header class="panel-head">
       <div class="title-row">
         <h1>阿墨的说话小人生成器 <span class="product-acronym">MTAG</span></h1>
-        <span class="v2-badge">v0.3.2</span>
+        <span class="v2-badge">v0.3.3</span>
       </div>
       <p>两张图片，一段语音，自动生成说话动画 ✧(ᐛ )</p>
     </header>
@@ -478,8 +507,8 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
         <div class="export-body" id="export-body" hidden>
           <div class="actions-row" style="margin-bottom:0">
             <select id="export-mode" title="导出格式" aria-label="导出格式">
+              <option value="mp4" selected>MP4 视频</option>
               <option value="webm">WebM 视频</option>
-              <option value="mp4">MP4 视频</option>
               <option value="gif">GIF 动图</option>
             </select>
             <button id="btn-export" class="btn primary grow" disabled>开始导出</button>
@@ -488,6 +517,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
           <div class="export-params">
             <div class="param"><div class="param-head"><label for="p-fps">帧率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-fps" title="重置帧率" aria-label="重置帧率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-fps" type="number" min="12" max="60" step="1" value="30" inputmode="numeric" aria-label="帧率"></span></label></div><input type="range" id="p-fps" min="12" max="60" step="1" value="30"></div>
             <div class="param"><div class="param-head"><label for="p-exp-h">导出高度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-exp-h" title="重置导出高度" aria-label="重置导出高度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-exp-h" type="number" min="360" max="1080" step="60" value="720" inputmode="numeric" aria-label="导出高度"></span></label></div><input type="range" id="p-exp-h" min="360" max="1080" step="60" value="720"></div>
+            <label class="check"><span>拓展画布<span class="hint-inline">为弹跳 / 摇摆预留安全边距；关闭后可能裁切动效</span></span><input type="checkbox" id="expand-canvas" checked aria-label="拓展画布"></label>
             <div class="param"><div class="param-head"><label for="p-vbitrate">视频码率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-vbitrate" title="重置视频码率" aria-label="重置视频码率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-vbitrate" type="number" min="1" max="16" step="0.5" value="8" inputmode="decimal" aria-label="视频码率"></span></label></div><input type="range" id="p-vbitrate" min="1" max="16" step="0.5" value="8"><div class="hint">越高越清晰、文件越大；<span id="export-size-est">加载音频后显示预估大小</span></div></div>
             <div class="param"><div class="param-head"><label for="p-gif-colors">GIF 颜色数 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-gif-colors" title="重置 GIF 颜色数" aria-label="重置 GIF 颜色数" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-gif-colors" type="number" min="8" max="256" step="8" value="256" inputmode="numeric" aria-label="GIF 颜色数"></span></label></div><input type="range" id="p-gif-colors" min="8" max="256" step="8" value="256"><div class="hint">颜色数量越少体积越小、但颜色断层也越明显。</div></div>
             <div class="param" style="margin-bottom:0">
@@ -504,7 +534,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
               </div>
               <div class="range-footer"><button id="export-full" class="btn" type="button" disabled>全长</button><span class="hint">滑块左端为起始时间，右端为结束时间。</span></div>
             </div>
-            <p class="hint" style="margin-top:10px">WebM(VP9+alpha) 透明底可进达芬奇/PR；MP4 不支持透明，选中时自动停用透明背景；GIF 仅 10 秒内、无半透明（自动白底），建议 360 高度 + 12~15 帧率控制体积。</p>
+            <p class="hint" style="margin-top:10px">导出完成后会自动保存；普通版下载到浏览器默认目录，app 可选择保存位置。WebM(VP9+alpha) 透明底可进达芬奇/PR；MP4 不支持透明，选中时自动停用透明背景；GIF 仅 10 秒内、无半透明（自动白底），建议 360 高度 + 12~15 帧率控制体积。</p>
           </div>
         </div>
       </div>
@@ -535,7 +565,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
           <button id="btn-record-audio" class="btn btn-record" type="button" aria-pressed="false">录音</button>
         </div>
         <div class="card-foot">
-          <p class="hint">只在本地处理，不会上传；支持 WAV / MP3 / M4A 等音频，也可选择视频提取音轨，或用麦克风直接录音</p>
+          <p class="hint">请点击左侧图标选择音频文件，支持 WAV / MP3 / M4A 等音频，也可选择视频提取音轨，或用麦克风直接录音。</p>
           <button id="btn-clear-audio" class="btn" type="button" hidden>清空</button>
         </div>
         <div id="media-status" class="media-status" hidden data-state="busy" role="status" aria-live="polite">

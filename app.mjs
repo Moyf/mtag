@@ -11,6 +11,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   imgs: { a: null, b: null, c: null, d: null },   // 闭嘴/张嘴/闭眼/张眼
+  sampleImages: false,   // 当前 A/B 是否仍是内置示例资源
   audioBuf: null, audioName: "",
   audioUrl: null, currentTime: 0, exportRangeInitialized: false,
   assetRevision: 0, audioLoadId: 0,
@@ -18,7 +19,8 @@ const state = {
   analysis: null,   // { rms, mouth, blink, bounce:{sx,sy}, wiggle, nframes, duration }
   playing: false,
   audioEl: null, rafId: 0,
-  exporting: false, exportController: null,
+  exporting: false, exportController: null, delivering: false,
+  pendingExport: null,   // { blob, format }，等待自动下载或 Tauri 保存
   mediaProcessing: false, mediaController: null, mediaKind: null,
   pendingMediaFile: null,
   recording: false,   // 麦克风录音进行中
@@ -49,7 +51,7 @@ function shortFileName(name, max = 28) {
 
 function openFilePicker(target = "") {
   // 待提取（pendingMediaFile）状态也允许重新选择：新选择会直接取代旧的视频。
-  if (state.exporting || state.mediaProcessing) return;
+  if (state.exporting || state.mediaProcessing || state.delivering) return;
   if (state.recording && target === "audio") {
     setStatus("正在录音，请先停止录音", false);
     return;
@@ -118,6 +120,7 @@ function params() {
     bounceFreq: +$("p-bfreq").value,
     fxWiggle: $("fx-wiggle").checked,
     wiggleAmp: +$("p-wiggle").value,
+    expandCanvas: $("expand-canvas")?.checked !== false,
     videoBitrateMbps: +$("p-vbitrate").value,
     gifColors: +$("p-gif-colors").value,
   };
@@ -208,7 +211,7 @@ function handleFiles(files, explicitTarget = undefined) {
   const target = explicitTarget === undefined ? $("file-input").dataset.target : explicitTarget;
   $("file-input").dataset.target = "";
   let imageTarget = target && target !== "audio" ? target : null;
-  const reservedImageSlots = new Set(Object.keys(state.imgs).filter((slot) => state.imgs[slot]));
+  let reservedImageSlots = null;
   for (const f of Array.from(files || [])) {
     if (isAudioFile(f)) {
       if (state.mediaProcessing || state.recording) {
@@ -225,6 +228,10 @@ function handleFiles(files, explicitTarget = undefined) {
       void loadAudioFromVideo(f);
     }
     else if (String(f?.type || "").toLowerCase().startsWith("image/") || /\.(png|webp|gif|jpe?g)$/i.test(String(f?.name || ""))) {
+      if (state.sampleImages) discardSampleImages();
+      if (!reservedImageSlots) {
+        reservedImageSlots = new Set(Object.keys(state.imgs).filter((slot) => state.imgs[slot]));
+      }
       const slot = imageTarget || nextEmptySlot(reservedImageSlots);
       if (slot) {
         reservedImageSlots.add(slot);
@@ -298,6 +305,7 @@ function videoPlaybackError(userGesture = false) {
 
 function queueVideoAudio(file) {
   const name = shortFileName(file.name);
+  clearPendingExport();
   state.audioLoadId++;
   state.mediaKind = "video";
   state.pendingMediaFile = file;
@@ -338,6 +346,7 @@ function finishImageLoad(slot) {
 function loadImage(file, target) {
   const slot = target && state.imgs.hasOwnProperty(target) && target !== "audio" ? target : nextEmptySlot();
   if (!slot) { setStatus("4 张图已满，先点缩略图替换", false); return; }
+  clearPendingExport();
   const assetRevision = state.assetRevision;
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -372,6 +381,73 @@ function loadImage(file, target) {
   img.src = url;
 }
 
+function loadSampleImage(source, target, label) {
+  const slot = target && state.imgs.hasOwnProperty(target) && target !== "audio" ? target : nextEmptySlot();
+  if (!slot) return;
+  const assetRevision = state.assetRevision;
+  const img = new Image();
+  const el = $(`slot-${slot}`);
+  imageLoadingCount++;
+  el.classList.add("loading");
+  el.setAttribute("aria-busy", "true");
+  setStatus(`正在读取${label}…`, true);
+  img.onload = () => {
+    if (assetRevision !== state.assetRevision) {
+      finishImageLoad(slot);
+      return;
+    }
+    const previous = state.imgs[slot];
+    const stillUsedByAnotherSlot = previous && Object.entries(state.imgs)
+      .some(([otherSlot, image]) => otherSlot !== slot && image === previous);
+    if (previous?.src?.startsWith("blob:") && !stillUsedByAnotherSlot) URL.revokeObjectURL(previous.src);
+    state.imgs[slot] = img;
+    el.style.backgroundImage = `url("${source}")`;
+    el.classList.add("loaded");
+    checkReady();
+    if (state.analysis) renderPlaybackTime(state.currentTime);
+    finishImageLoad(slot);
+  };
+  img.onerror = () => {
+    imageLoadingHadError = true;
+    setStatus(`${label}读取失败`, false);
+    finishImageLoad(slot);
+  };
+  img.src = source;
+}
+
+function discardSampleImages() {
+  if (!state.sampleImages) return;
+  state.assetRevision++;
+  for (const slot of Object.keys(state.imgs)) {
+    const img = state.imgs[slot];
+    if (img?.src?.startsWith("blob:")) URL.revokeObjectURL(img.src);
+    state.imgs[slot] = null;
+    const el = $(`slot-${slot}`);
+    el.style.backgroundImage = "";
+    el.classList.remove("loaded", "loading");
+    el.removeAttribute("aria-busy");
+  }
+  state.sampleImages = false;
+  canvas.width = 640;
+  canvas.height = 480;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!state.audioBuf && !state.audioName && !state.mono) {
+    state.analysis = null;
+    state.demo = false;
+    resetPlayback();
+    state.exportRangeInitialized = false;
+    $("export-start").value = "0";
+    $("export-end").value = "0";
+  }
+  checkReady();
+}
+
+function loadSampleImages() {
+  state.sampleImages = true;
+  loadSampleImage("./assets/moy-1-0.png", "a", "示例图片 moy-1-0");
+  loadSampleImage("./assets/moy-1-1.png", "b", "示例图片 moy-1-1");
+}
+
 function reuseImageForMouth() {
   if (!state.imgs.a || state.imgs.b || state.exporting || state.mediaProcessing || state.pendingMediaFile) return;
   state.imgs.b = state.imgs.a;
@@ -387,6 +463,7 @@ function reuseImageForMouth() {
 
 function beginAudioLoad(file, loadingText, mediaKind = "audio") {
   const name = shortFileName(file.name);
+  clearPendingExport();
   const controller = new AbortController();
   const load = {
     audioLoadId: ++state.audioLoadId,
@@ -465,7 +542,7 @@ function readFileAsArrayBuffer(file, onProgress, signal = null) {
   });
 }
 
-async function loadAudio(file) {
+async function loadAudio(file, sourceLabel = "音频") {
   const load = beginAudioLoad(file, "读取音频", "audio");
   let ac = null;
   try {
@@ -488,7 +565,7 @@ async function loadAudio(file) {
     ac = new AudioContextCtor();
     const audioBuf = await ac.decodeAudioData(buf);
     throwIfMediaStopped(load.signal);
-    commitAudioBuffer(file, audioBuf, load, "音频");
+    commitAudioBuffer(file, audioBuf, load, sourceLabel);
   } catch (e) {
     if (!isCurrentAudioLoad(load)) return;
     state.mediaProcessing = false;
@@ -511,6 +588,29 @@ async function loadAudio(file) {
     if (isCurrentAudioLoad(load)) {
       state.mediaProcessing = false;
       if (state.mediaController === load.controller) state.mediaController = null;
+      checkReady();
+    }
+  }
+}
+
+async function loadSampleAudio() {
+  // 示例音频通过 fetch 转成与文件选择器相同的 Blob/File，复用完整的读取、解码和分析流程。
+  try {
+    const response = await fetch("./assets/example-audio.mp3");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    // 用户在示例音频加载期间选择或清空了音频时，不再用示例覆盖用户操作。
+    if (state.audioLoadId !== 0 || state.audioName || state.audioBuf || state.mono || state.pendingMediaFile || state.mediaProcessing || state.recording) return;
+    const file = typeof File === "function"
+      ? new File([blob], "example-audio.mp3", { type: blob.type || "audio/mpeg" })
+      : blob;
+    if (!file.name) {
+      try { Object.defineProperty(file, "name", { value: "example-audio.mp3" }); } catch (_) { /* 旧容器的 Blob 可能不可扩展 */ }
+    }
+    await loadAudio(file, "示例音频");
+  } catch (e) {
+    if (state.audioLoadId === 0 && !state.audioName && !state.audioBuf && !state.mono) {
+      setStatus(`示例音频加载失败：${errorMessage(e)}`, false);
       checkReady();
     }
   }
@@ -1260,21 +1360,24 @@ function analyze() {
 
 function checkReady() {
   const hasImgs = Boolean(state.imgs.a && state.imgs.b);
+  const hasAnyImages = Object.values(state.imgs).some(Boolean);
   // 无音频时自动生成演示动画，让用户不开口也能直接导出预览视频/GIF。
   const hasAudioActivity = Boolean(state.audioName || state.audioBuf || state.mono || state.pendingMediaFile);
   if (hasImgs && !hasAudioActivity && !state.analysis) ensureDemoAnalysis();
   const ready = Boolean(hasImgs && state.analysis);   // 可导出（正式分析或演示动画）
   const playable = hasImgs && Boolean(state.analysis || !state.mono); // 可播放（无音频走演示）
   const mediaPending = Boolean(state.pendingMediaFile);
-  const busy = state.exporting || state.mediaProcessing || state.recording || mediaPending;
+  const busy = state.exporting || state.mediaProcessing || state.recording || mediaPending || state.delivering;
   const rangeReady = Boolean(updateExportRangeUi());
   $("btn-play").disabled = !playable || busy;
   $("btn-seek-play").disabled = !playable || busy;
   // 播放时也允许导出；exportVideo() 会先保存预览位置并暂停播放。
   $("btn-export").disabled = !ready || busy || !rangeReady;
+  const shareSaveButton = $("btn-share-save");
+  if (shareSaveButton) shareSaveButton.disabled = !state.pendingExport || busy;
   const hasMaterials = Object.values(state.imgs).some(Boolean) || Boolean(state.audioBuf || state.audioName || state.analysis);
   // 媒体读取卡住时仍必须能重置；重置会先中止当前处理再清空素材。
-  $("btn-reanalyze").disabled = !hasMaterials || state.exporting;
+  $("btn-reanalyze").disabled = !hasMaterials || state.exporting || state.delivering;
   $("btn-export-toggle").disabled = !hasMaterials || busy;
   $("seek").disabled = !state.analysis || busy;
   const fileSelectionDisabled = state.exporting || state.mediaProcessing;
@@ -1289,7 +1392,7 @@ function checkReady() {
     slot.setAttribute("aria-disabled", String(fileSelectionDisabled));
   }
   updateCanvasHints(hasImgs);
-  if (hasImgs && !state.analysis) drawFrame(0);   // 只装了立绘时也先展示 A 面
+  if (hasAnyImages && !state.analysis) drawFrame(0);   // 只装了一张立绘时也先展示当前图片
   updateBusyUi();
   updatePlaybackUi();
   updateAlternateUi();
@@ -1321,14 +1424,16 @@ function updateClearButtonsUi() {
   const imagesButton = $("btn-clear-images");
   const audioButton = $("btn-clear-audio");
   imagesButton.hidden = !hasImages;
-  imagesButton.disabled = state.exporting;
+  imagesButton.disabled = state.exporting || state.delivering;
   audioButton.hidden = !hasAudioActivity;
-  audioButton.disabled = state.exporting || state.recording;
+  audioButton.disabled = state.exporting || state.recording || state.delivering;
 }
 
 /** 只清空图片：有音频时保留口型分析，重选图片后直接复用 */
 function clearImages() {
-  if (state.exporting) return;
+  if (state.exporting || state.delivering) return;
+  clearPendingExport();
+  state.sampleImages = false;
   state.assetRevision++;   // 使仍在加载中的图片失效
   const revoked = new Set();
   for (const slot of Object.keys(state.imgs)) {
@@ -1361,7 +1466,8 @@ function clearImages() {
 
 /** 只清空音频：进行中的读取/提取一并取消，图片与图片相关的设置保留 */
 function clearAudio() {
-  if (state.exporting) return;
+  if (state.exporting || state.delivering) return;
+  clearPendingExport();
   if (state.recording) {
     setStatus("正在录音，请先停止录音", false);
     return;
@@ -1400,12 +1506,16 @@ $("btn-clear-audio").addEventListener("click", clearAudio);
 function updateCanvasHints(hasImgs) {
   const dropHint = $("drop-hint");
   const previewHint = $("preview-hint");
+  const demoHint = $("demo-hint");
+  const sampleHint = $("sample-resource-hint");
+  const sampleActionHint = $("sample-image-action-hint");
   const reuseButton = $("reuse-image-btn");
   const imageCount = Object.values(state.imgs).filter(Boolean).length;
   const hasAudio = Boolean(state.mono || state.audioBuf || state.audioName);
   const missingMouthImage = state.imgs.a && !state.imgs.b;
   const missingClosedImage = !state.imgs.a && state.imgs.b;
 
+  dropHint.classList.toggle("incomplete", imageCount === 1);
   dropHint.style.display = hasImgs ? "none" : "flex";
   if (missingMouthImage) {
     $("drop-hint-title").textContent = "请再选择一张「张嘴」图片";
@@ -1423,7 +1533,12 @@ function updateCanvasHints(hasImgs) {
     $("drop-hint-details").hidden = false;
     $("drop-hint-extra").hidden = false;
   }
-  previewHint.hidden = !(hasImgs && !hasAudio);
+  const showDemoHint = hasImgs && !hasAudio;
+  const showSampleHint = hasImgs && state.sampleImages;
+  if (demoHint) demoHint.hidden = !showDemoHint;
+  if (sampleHint) sampleHint.hidden = !showSampleHint;
+  if (sampleActionHint) sampleActionHint.hidden = !showSampleHint;
+  previewHint.hidden = !(showDemoHint || showSampleHint);
 }
 
 // ---------- 渲染 ----------
@@ -1464,15 +1579,15 @@ function paintBackground(bg, w, h) {
 /** 用当前设置重绘预览帧（导出、载入等场景共用） */
 function refreshPreviewFrame() {
   if (state.analysis) renderPlaybackTime(state.currentTime);
-  else if (state.imgs.a && state.imgs.b) drawFrame(0);
+  else if (Object.values(state.imgs).some(Boolean)) drawFrame(0);
 }
 
 function drawFrame(f) {
   const A = state.analysis;
-  const img = currentImage(f) || state.imgs.a;
+  const img = currentImage(f) || Object.values(state.imgs).find(Boolean);
   if (!img) return;
   // 画布比图片大一圈，给弹跳/摇摆留下安全空间。
-  const { width, height, imageWidth, imageHeight, padding } = canvasLayout(img, +$("p-exp-h").value);
+  const { width, height, imageWidth, imageHeight, padding } = canvasLayout(img, +$("p-exp-h").value, $("expand-canvas")?.checked !== false);
   if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
 
   ctx.clearRect(0, 0, width, height);
@@ -1677,12 +1792,12 @@ function updateBusyUi() {
   const progressWrap = $("export-progress-wrap");
   progressWrap.hidden = !state.exporting;
   progressWrap.setAttribute("aria-hidden", String(!state.exporting));
-  const busy = state.exporting || state.mediaProcessing || Boolean(state.pendingMediaFile);
+  const busy = state.exporting || state.mediaProcessing || Boolean(state.pendingMediaFile) || state.delivering;
   const stopping = Boolean(state.exportController?.signal?.aborted);
   $("btn-stop-export").disabled = !state.exporting || stopping;
   $("btn-stop-export").textContent = stopping ? "正在停止…" : "停止导出";
   for (const id of [
-    "export-mode", "export-fast", "bg-color", "bg-image-btn",
+    "export-mode", "export-fast", "expand-canvas", "bg-color", "bg-image-btn",
     "export-range-slider-start", "export-range-slider-end",
     "p-threshold", "n-threshold",
     "p-attack", "n-attack", "p-release", "n-release", "mouth-alternate",
@@ -1852,11 +1967,12 @@ function resetPlayback() {
 }
 
 function clearMaterials() {
-  if (state.exporting) return;
+  if (state.exporting || state.delivering) return;
   if (state.recording) {
     setStatus("正在录音，请先停止录音", false);
     return;
   }
+  clearPendingExport();
   state.mediaController?.abort();
   state.mediaController = null;
   state.mediaKind = null;
@@ -2029,6 +2145,7 @@ syncAppHeight();
 
 // ---------- 导出 ----------
 $("btn-export").addEventListener("click", () => { void exportVideo(); });
+$("btn-share-save")?.addEventListener("click", () => { void sharePendingExport(); });
 $("btn-stop-export").addEventListener("click", stopExport);
 
 function stopExport() {
@@ -2036,6 +2153,18 @@ function stopExport() {
   state.exportController.abort();
   updateBusyUi();
   setStatus("正在停止导出…");
+}
+
+function clearPendingExport() {
+  state.pendingExport = null;
+}
+
+function queueExport(blob, exportFormat) {
+  const actualMime = String(blob?.type || "").split(";")[0].toLowerCase();
+  if (exportFormat === "mp4" && actualMime !== "video/mp4") {
+    throw new Error("MP4 导出产物不是 video/mp4，已停止保存");
+  }
+  state.pendingExport = { blob, format: exportFormat };
 }
 
 async function exportVideo() {
@@ -2109,7 +2238,7 @@ function formatLabel(format, bg) {
 async function exportVideoFast(format, exportRange, signal) {
   const A = state.analysis;
   const p = params();
-  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value);
+  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value, p.expandCanvas);
   const frameCount = exportRange.endFrame - exportRange.startFrame;
   const bg = backgroundStyle();
   throwIfExportStopped(signal);
@@ -2133,10 +2262,11 @@ async function exportVideoFast(format, exportRange, signal) {
       },
     });
     throwIfExportStopped(signal);
-    downloadBlob(blob, format);
+    queueExport(blob, format);
     const secs = Math.max(0.001, (performance.now() - t0) / 1000);
     setExportProgress(1, 1);
-    setStatus("导出完成：" + (blob.size / 1048576).toFixed(1) + " MB，" + formatExportRange(exportRange) + "，" + secs.toFixed(1) + "s（" + (exportRange.duration / secs).toFixed(1) + "× 实时）", true);
+    const delivered = await deliverPendingExport();
+    if (delivered) setStatus("导出完成：" + (blob.size / 1048576).toFixed(1) + " MB，" + formatExportRange(exportRange) + "，" + secs.toFixed(1) + "s（" + (exportRange.duration / secs).toFixed(1) + "× 实时），" + exportDeliveryLabel(), true);
   } catch (e) {
     if (isExportStopped(e)) throw e;
     throw new Error(`快速导出失败（${e.message?.slice(0, 80) || "未知错误"}）`);
@@ -2147,7 +2277,7 @@ async function exportVideoFast(format, exportRange, signal) {
 async function exportVideoGif(exportRange, signal) {
   const A = state.analysis;
   const p = params();
-  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value);
+  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value, p.expandCanvas);
   const frameCount = exportRange.endFrame - exportRange.startFrame;
   // GIF 只有 1 位透明，抗锯齿边缘会出毛边；未开启背景时统一用白底。
   const bg = backgroundStyle() || { color: "#ffffff" };
@@ -2169,10 +2299,11 @@ async function exportVideoGif(exportRange, signal) {
       },
     });
     throwIfExportStopped(signal);
-    downloadBlob(blob, "gif");
+    queueExport(blob, "gif");
     const secs = Math.max(0.001, (performance.now() - t0) / 1000);
     setExportProgress(1, 1);
-    setStatus("GIF 导出完成：" + (blob.size / 1048576).toFixed(1) + " MB，" + formatExportRange(exportRange) + "，" + secs.toFixed(1) + "s", true);
+    const delivered = await deliverPendingExport();
+    if (delivered) setStatus("GIF 导出完成：" + (blob.size / 1048576).toFixed(1) + " MB，" + formatExportRange(exportRange) + "，" + secs.toFixed(1) + "s，" + exportDeliveryLabel(), true);
   } catch (e) {
     if (isExportStopped(e)) throw e;
     throw new Error(`GIF 导出失败（${e.message?.slice(0, 80) || "未知错误"}）`);
@@ -2215,12 +2346,16 @@ async function exportVideoRealtime(format, exportRange, signal) {
       for (const track of destination.stream.getAudioTracks()) stream.addTrack(track);
     }
     const mimeCandidates = format === "mp4"
-      ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+      ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4"]
       : ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
     const mime = mimeCandidates.find(type => MediaRecorder.isTypeSupported(type)) || "";
     const chunks = [];
     const videoBitsPerSecond = Math.round(params().videoBitrateMbps * 1e6) || 8_000_000;
     rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond } : { videoBitsPerSecond });
+    const actualMime = (rec.mimeType || mime || "").split(";")[0].toLowerCase();
+    if (format === "mp4" && actualMime !== "video/mp4") {
+      throw new Error("当前浏览器无法生成 H.264/AAC MP4，请更新浏览器或改选 WebM");
+    }
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
 
     const done = new Promise((resolve, reject) => {
@@ -2270,9 +2405,10 @@ async function exportVideoRealtime(format, exportRange, signal) {
     // Blob type 必须是裸 mime：rec.mimeType 常带 codecs 后缀（如 video/mp4;codecs=…），
     // 拼进 data:uri 会变成 data:video/mp4;codecs=…;base64,…，原生侧 data-uri 解析失败。
     const blob = new Blob(chunks, { type: (rec.mimeType || "video/webm").split(";")[0] });
-    downloadBlob(blob, format);
+    queueExport(blob, format);
     setExportProgress(1, 1);
-    setStatus("导出完成：" + (blob.size / 1048576).toFixed(1) + " MB " + (blob.type.includes("mp4") ? "MP4" : "WebM") + "，" + formatExportRange(exportRange) + (bg ? "（含背景）" : "（VP9 透明，达芬奇/PR 直用）"), true);
+    const delivered = await deliverPendingExport();
+    if (delivered) setStatus("导出完成：" + (blob.size / 1048576).toFixed(1) + " MB " + (blob.type.includes("mp4") ? "MP4" : "WebM") + "，" + formatExportRange(exportRange) + (bg ? "（含背景）" : "（VP9 透明，达芬奇/PR 直用）") + "，" + exportDeliveryLabel(), true);
   } finally {
     signal?.removeEventListener("abort", stopOnAbort);
     cancelAnimationFrame(rafId);
@@ -2283,17 +2419,126 @@ async function exportVideoRealtime(format, exportRange, signal) {
   }
 }
 
+function exportFileName(blob, exportFormat) {
+  const base = (state.audioName || (state.demo ? "mtag-demo" : "lipsync")).replace(/\.[^.]+$/, "");
+  const mime = String(blob?.type || "").toLowerCase();
+  const isGif = mime.includes("gif");
+  const ext = isGif ? "gif" : mime.includes("mp4") ? "mp4" : "webm";
+  const tag = isGif ? "gif" : exportFormat === "mp4" ? "video" : "alpha";
+  return `${base}-${tag}.${ext}`;
+}
+
 function downloadBlob(blob, exportFormat) {
   const a = document.createElement("a");
   const url = URL.createObjectURL(blob);
   a.href = url;
-  const base = (state.audioName || (state.demo ? "mtag-demo" : "lipsync")).replace(/\.[^.]+$/, "");
-  const isGif = blob.type.includes("gif");
-  const ext = isGif ? "gif" : blob.type.includes("mp4") ? "mp4" : "webm";
-  const tag = isGif ? "gif" : exportFormat === "mp4" ? "video" : "alpha";
-  a.download = `${base}-${tag}.${ext}`;
+  a.download = exportFileName(blob, exportFormat);
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function getTauriInvoke() {
+  const invoke = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
+  return typeof invoke === "function" ? invoke : null;
+}
+
+function isTauriApp() {
+  return Boolean(getTauriInvoke());
+}
+
+function isMiniToolEnvironment() {
+  return Boolean(window.xhs?.miniTool);
+}
+
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function saveBlobInTauri(blob, exportFormat) {
+  const invoke = getTauriInvoke();
+  if (!invoke) throw new Error("Tauri 保存接口不可用");
+  const data = await blobToBase64(blob);
+  return invoke("save_export_file", {
+    name: exportFileName(blob, exportFormat),
+    data,
+  });
+}
+
+function exportDeliveryLabel() {
+  if (isMiniToolEnvironment()) return "请点击「分享/保存」";
+  return isTauriApp() ? "已保存" : "已开始下载";
+}
+
+async function deliverPendingExport() {
+  // 小红书版需要把 Blob 留给发布页/相册桥接，不走普通浏览器下载。
+  if (isMiniToolEnvironment()) return true;
+  const pending = state.pendingExport;
+  if (!pending || state.delivering) return false;
+  state.delivering = true;
+  checkReady();
+  try {
+    if (isTauriApp()) {
+      setStatus("请选择导出文件的保存位置…", true);
+      const savedPath = await saveBlobInTauri(pending.blob, pending.format);
+      if (!savedPath) {
+        setStatus("已取消保存导出文件", false);
+        return false;
+      }
+    } else {
+      downloadBlob(pending.blob, pending.format);
+    }
+    state.pendingExport = null;
+    return true;
+  } catch (e) {
+    console.error("保存导出文件失败：", e);
+    setStatus("保存导出文件失败：" + errorMessage(e), false);
+    return false;
+  } finally {
+    state.delivering = false;
+    checkReady();
+  }
+}
+
+async function sharePendingExport() {
+  const pending = state.pendingExport;
+  if (!pending || state.delivering) return;
+  state.delivering = true;
+  checkReady();
+  try {
+    const file = typeof File === "function"
+      ? new File([pending.blob], exportFileName(pending.blob, pending.format), { type: pending.blob.type })
+      : null;
+    const canShareFile = file
+      && typeof navigator.share === "function"
+      && typeof navigator.canShare === "function"
+      && navigator.canShare({ files: [file] });
+    if (canShareFile) {
+      setStatus("正在打开系统分享面板…", true);
+      await navigator.share({
+        files: [file],
+        title: "MTAG 导出",
+        text: "Moy 的角色说话动画",
+      });
+      state.pendingExport = null;
+      setStatus("分享/保存已完成", true);
+    } else {
+      downloadBlob(pending.blob, pending.format);
+      state.pendingExport = null;
+      setStatus("已开始保存导出文件", true);
+    }
+  } catch (e) {
+    if (e?.name === "AbortError") setStatus("已取消分享，可再次点击「分享/保存」", false);
+    else setStatus("分享/保存失败：" + errorMessage(e), false);
+  } finally {
+    state.delivering = false;
+    checkReady();
+  }
 }
 
 // ---------- 参数联动 ----------
@@ -2413,7 +2658,7 @@ function commitParameter(id) {
     if (state.mono) analyze();
     else if (state.demo) rebuildDemo();   // 演示模式下用新参数重建演示数据
   } else if (id === "p-exp-h") {
-    if (state.analysis) renderPlaybackTime(state.currentTime);
+    refreshPreviewFrame();
   } else if (id === "p-vbitrate") {
     updateExportRangeUi();   // 码率变化只影响文件大小预估，无需重分析
   }
@@ -2517,6 +2762,7 @@ $("export-mode").addEventListener("change", () => {
   updateExportRangeUi();
   checkReady();
 });
+$("expand-canvas")?.addEventListener("change", refreshPreviewFrame);
 applyFormatBackgroundRules();
 updateFormatParamsUi();
 
@@ -2559,6 +2805,7 @@ for (const button of document.querySelectorAll(".param-reset")) {
 $("btn-reanalyze").addEventListener("click", clearMaterials);
 
 // ---------- 背景 ----------
+const imageBackgroundPrompt = "已选择图片背景，请点击「选择背景图片」上传一张图";
 function updateBackgroundUi() {
   const type = document.querySelector('input[name="bg-type"]:checked')?.value || "transparent";
   $("bg-color-row").hidden = type !== "color";
@@ -2592,8 +2839,11 @@ function updateFormatParamsUi() {
 
 for (const radio of document.querySelectorAll('input[name="bg-type"]')) {
   radio.addEventListener("change", () => {
-    if (radio.checked && radio.value === "image" && !state.bgImage) {
-      setStatus("已选择图片背景，请点击「选择背景图片」上传一张图", true);
+    if (!radio.checked) return;
+    if (radio.value === "image" && !state.bgImage) {
+      setStatus(imageBackgroundPrompt, true);
+    } else if ($("status").textContent === imageBackgroundPrompt) {
+      setStatus("");
     }
     updateBackgroundUi();
   });
@@ -2705,4 +2955,6 @@ function setStatus(msg, ok = false) {
   el.textContent = msg;
   el.className = ok ? "ok" : "";
 }
+loadSampleImages();
+void loadSampleAudio();
 checkReady();

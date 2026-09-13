@@ -32347,7 +32347,7 @@ ${cue.notes ?? ""}`;
   }
   /**
    * Due to [a bug in Chromium](https://bugs.chromium.org/p/chromium/issues/detail?id=1377842), VP9 streams often
-  	 * lack color space information. This method patches in that information.
+   * lack color space information. This method patches in that information.
    */
   fixVP9ColorSpace(trackData, chunk) {
     if (chunk.type !== "key") return;

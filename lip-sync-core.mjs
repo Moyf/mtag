@@ -58,8 +58,9 @@ export function gifFrameDelays(count, fps) {
 /**
  * 计算图片与画布的安全边距。
  * 图片四周至少预留图片高度 10% 的空间，并按当前控件上限为弹跳/摇摆留足余量。
+ * 关闭拓展时，画布保持图片原始比例，导出高度只控制图片与画布高度。
  */
-export function canvasLayout(img, targetH) {
+export function canvasLayout(img, targetH, expandCanvas = true) {
   const naturalWidth = Number(img?.naturalWidth);
   const naturalHeight = Number(img?.naturalHeight);
   if (!(naturalWidth > 0 && naturalHeight > 0)) {
@@ -67,6 +68,15 @@ export function canvasLayout(img, targetH) {
   }
   const imageHeight = Math.max(1, Math.round(Number(targetH) || 0));
   const imageWidth = Math.max(1, Math.round(naturalWidth * imageHeight / naturalHeight));
+  if (expandCanvas === false) {
+    return {
+      width: imageWidth,
+      height: imageHeight,
+      imageWidth,
+      imageHeight,
+      padding: 0,
+    };
+  }
   const maxBounce = 0.2;
   const maxWiggle = 3 * Math.PI / 180;
   const halfWidth = imageWidth / 2;
