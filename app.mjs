@@ -3,7 +3,7 @@
  * 素材载入 → AudioContext 解码 → core 分析（RMS/阈值/眨眼/动效）→ canvas 逐帧渲染
  * 导出：默认 WebCodecs 快速编码，MediaRecorder 实时录制兜底；支持范围、进度与中止
  */
-import { frameRMS, thresholdStates, alternateMouthStates, resolveExportRange, scheduleBlinks, mulberry32, talkBounce, talkWiggle, audioBufferToMono, mobileVideoSizeLimitMessage, mobileVideoDurationLimitMessage, GIF_MAX_DURATION_SEC, canvasLayout } from "./lip-sync-core.mjs";
+import { frameRMS, thresholdStates, alternateMouthStates, resolveExportRange, scheduleBlinks, mulberry32, talkBounce, talkWiggle, talkZoom, audioBufferToMono, mobileVideoSizeLimitMessage, mobileVideoDurationLimitMessage, GIF_MAX_DURATION_SEC, canvasLayout } from "./lip-sync-core.mjs";
 import { exportFast } from "./export-fast.mjs";
 import { exportGif } from "./export-gif.mjs";
 
@@ -16,7 +16,7 @@ const state = {
   audioUrl: null, currentTime: 0, exportRangeInitialized: false,
   assetRevision: 0, audioLoadId: 0,
   mono: null, sr: 44100,
-  analysis: null,   // { rms, mouth, blink, bounce:{sx,sy}, wiggle, nframes, duration }
+  analysis: null,   // { rms, mouth, blink, bounce:{sx,sy}, wiggle, zoom, nframes, duration }
   playing: false,
   audioEl: null, rafId: 0,
   exporting: false, exportController: null, delivering: false,
@@ -120,6 +120,11 @@ function params() {
     bounceFreq: +$("p-bfreq").value,
     fxWiggle: $("fx-wiggle").checked,
     wiggleAmp: +$("p-wiggle").value,
+    wigglePivot: $("p-wiggle-pivot").value,
+    fxZoom: $("fx-zoom").checked,
+    zoomScale: +$("p-zoom").value,
+    zoomFreq: +$("p-zoom-freq").value,
+    zoomPivot: $("p-zoom-pivot").value,
     expandCanvas: $("expand-canvas")?.checked !== false,
     videoBitrateMbps: +$("p-vbitrate").value,
     gifColors: +$("p-gif-colors").value,
@@ -1346,7 +1351,12 @@ function analyze() {
   const blink = scheduleBlinks(mouth.length, p.fps, p.blinkMin, p.blinkMax, p.blinkDur, rng);
   const bounce = p.fxBounce ? talkBounce(speaking, p.fps, p.bounceAmp, p.bounceFreq) : null;
   const wiggle = p.fxWiggle ? talkWiggle(speaking, p.fps, p.wiggleAmp) : null;
-  state.analysis = { rms, speaking, mouth, blink, bounce, wiggle, nframes: mouth.length, duration: state.mono.length / state.sr };
+  const zoom = p.fxZoom ? talkZoom(speaking, p.fps, p.zoomScale, p.zoomFreq) : null;
+  state.analysis = {
+    rms, speaking, mouth, blink, bounce, wiggle, zoom,
+    wigglePivot: p.wigglePivot, zoomPivot: p.zoomPivot,
+    nframes: mouth.length, duration: state.mono.length / state.sr,
+  };
   $("t-total").textContent = fmtTime(state.analysis.duration);
   if (!state.exportRangeInitialized) {
     $("export-start").value = "0";
@@ -1584,23 +1594,38 @@ function refreshPreviewFrame() {
 
 function drawFrame(f) {
   const A = state.analysis;
+  const p = params();
   const img = currentImage(f) || Object.values(state.imgs).find(Boolean);
   if (!img) return;
-  // 画布比图片大一圈，给弹跳/摇摆留下安全空间。
-  const { width, height, imageWidth, imageHeight, padding } = canvasLayout(img, +$("p-exp-h").value, $("expand-canvas")?.checked !== false);
+  // 底部轴点预览保持固定构图；中心轴点采用上下对称边距，导出布局按所选轴点预留空间。
+  const expandCanvas = $("expand-canvas")?.checked !== false;
+  const centeredPivot = (p.fxWiggle && p.wigglePivot === "center") || (p.fxZoom && p.zoomPivot === "center");
+  const previewZoomScale = centeredPivot && p.fxZoom ? p.zoomScale : 1;
+  const { width, height, imageWidth, imageHeight, padding } = canvasLayout(img, +$("p-exp-h").value, expandCanvas, previewZoomScale, centeredPivot);
   if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
 
   ctx.clearRect(0, 0, width, height);
   paintBackground(backgroundStyle(), width, height);
 
-  let sx = 1, sy = 1, rot = 0;
+  let sx = 1, sy = 1, rot = 0, zoom = 1;
   if (A) {
     if (A.bounce) { sx = A.bounce.sx[f] || 1; sy = A.bounce.sy[f] || 1; }
     if (A.wiggle) { rot = A.wiggle[f] || 0; }
+    if (A.zoom) { zoom = A.zoom[f] || 1; }
   }
   ctx.save();
   ctx.translate(width / 2, padding + imageHeight);
-  ctx.rotate(rot * Math.PI / 180);
+  const applyAroundPivot = (pivotY, transform) => {
+    ctx.translate(0, pivotY);
+    transform();
+    ctx.translate(0, -pivotY);
+  };
+  const zoomPivotY = p.zoomPivot === "center" ? -sy * imageHeight / 2 : 0;
+  const centerAfterZoomY = p.zoomPivot === "center" ? -sy * imageHeight / 2 : -sy * zoom * imageHeight / 2;
+  const bottomAfterZoomY = p.zoomPivot === "center" ? sy * (zoom - 1) * imageHeight / 2 : 0;
+  const wigglePivotY = p.wigglePivot === "center" ? centerAfterZoomY : bottomAfterZoomY;
+  applyAroundPivot(wigglePivotY, () => ctx.rotate(rot * Math.PI / 180));
+  applyAroundPivot(zoomPivotY, () => ctx.scale(zoom, zoom));
   ctx.scale(sx, sy);
   ctx.drawImage(img, -imageWidth / 2, -imageHeight, imageWidth, imageHeight);
   ctx.restore();
@@ -1804,6 +1829,7 @@ function updateBusyUi() {
     "p-alt-freq", "n-alt-freq", "p-bmin", "n-bmin", "p-bmax", "n-bmax",
     "p-bdur", "n-bdur", "p-seed", "n-seed", "fx-bounce", "p-bounce",
     "n-bounce", "p-bfreq", "n-bfreq", "fx-wiggle", "p-wiggle", "n-wiggle",
+    "p-wiggle-pivot", "fx-zoom", "p-zoom", "n-zoom", "p-zoom-freq", "n-zoom-freq", "p-zoom-pivot",
     "p-fps", "n-fps", "p-exp-h", "n-exp-h", "p-vbitrate", "n-vbitrate",
     "p-gif-colors", "n-gif-colors",
   ]) {
@@ -1841,6 +1867,8 @@ function ensureDemoAnalysis() {
     rms: null, speaking, mouth, blink,
     bounce: p.fxBounce ? talkBounce(speaking, fps, p.bounceAmp, p.bounceFreq) : null,
     wiggle: p.fxWiggle ? talkWiggle(speaking, fps, p.wiggleAmp) : null,
+    zoom: p.fxZoom ? talkZoom(speaking, fps, p.zoomScale, p.zoomFreq) : null,
+    wigglePivot: p.wigglePivot, zoomPivot: p.zoomPivot,
     nframes: n, duration,
   };
   state.demo = true;
@@ -2181,12 +2209,12 @@ async function exportVideo() {
     );
   } catch (e) {
     updateExportRangeUi();
-    setStatus("导出范围无效：" + errorMessage(e), false);
+    setExportError("导出范围无效：" + errorMessage(e));
     return;
   }
   const format = $("export-mode").value;   // webm | mp4 | gif
   if (format === "gif" && exportRange.duration > GIF_MAX_DURATION_SEC) {
-    setStatus("GIF 仅支持导出 " + GIF_MAX_DURATION_SEC + " 秒以内的内容，请调整导出范围", false);
+    setExportError("GIF 仅支持导出 " + GIF_MAX_DURATION_SEC + " 秒以内的内容，请调整导出范围");
     return;
   }
   // 导出和实时播放都会绘制 canvas，先暂停播放避免两套渲染互相覆盖。
@@ -2218,7 +2246,8 @@ async function exportVideo() {
     }
   } catch (e) {
     console.error("导出失败：", e);
-    setStatus(isExportStopped(e) || signal.aborted ? "已停止导出" : "导出失败：" + errorMessage(e), false);
+    if (isExportStopped(e) || signal.aborted) setStatus("已停止导出", false);
+    else setExportError("导出失败：" + errorMessage(e));
   } finally {
     state.exporting = false;
     if (state.exportController === controller) state.exportController = null;
@@ -2238,7 +2267,8 @@ function formatLabel(format, bg) {
 async function exportVideoFast(format, exportRange, signal) {
   const A = state.analysis;
   const p = params();
-  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value, p.expandCanvas);
+  const centeredPivot = (p.fxWiggle && p.wigglePivot === "center") || (p.fxZoom && p.zoomPivot === "center");
+  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value, p.expandCanvas, p.fxZoom ? p.zoomScale : 1, centeredPivot);
   const frameCount = exportRange.endFrame - exportRange.startFrame;
   const bg = backgroundStyle();
   throwIfExportStopped(signal);
@@ -2277,7 +2307,8 @@ async function exportVideoFast(format, exportRange, signal) {
 async function exportVideoGif(exportRange, signal) {
   const A = state.analysis;
   const p = params();
-  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value, p.expandCanvas);
+  const centeredPivot = (p.fxWiggle && p.wigglePivot === "center") || (p.fxZoom && p.zoomPivot === "center");
+  const { width: W, height: H, imageWidth, imageHeight, padding } = canvasLayout(state.imgs.a, +$("p-exp-h").value, p.expandCanvas, p.fxZoom ? p.zoomScale : 1, centeredPivot);
   const frameCount = exportRange.endFrame - exportRange.startFrame;
   // GIF 只有 1 位透明，抗锯齿边缘会出毛边；未开启背景时统一用白底。
   const bg = backgroundStyle() || { color: "#ffffff" };
@@ -2497,7 +2528,7 @@ async function deliverPendingExport() {
     return true;
   } catch (e) {
     console.error("保存导出文件失败：", e);
-    setStatus("保存导出文件失败：" + errorMessage(e), false);
+    setExportError("保存导出文件失败：" + errorMessage(e));
     return false;
   } finally {
     state.delivering = false;
@@ -2534,7 +2565,7 @@ async function sharePendingExport() {
     }
   } catch (e) {
     if (e?.name === "AbortError") setStatus("已取消分享，可再次点击「分享/保存」", false);
-    else setStatus("分享/保存失败：" + errorMessage(e), false);
+    else setExportError("分享/保存失败：" + errorMessage(e));
   } finally {
     state.delivering = false;
     checkReady();
@@ -2546,13 +2577,15 @@ const rangeBindings = [
   ["p-threshold", "n-threshold"], ["p-attack", "n-attack"], ["p-release", "n-release"],
   ["p-alt-freq", "n-alt-freq"], ["p-bmin", "n-bmin"], ["p-bmax", "n-bmax"],
   ["p-bdur", "n-bdur"], ["p-seed", "n-seed"], ["p-bounce", "n-bounce"],
-  ["p-bfreq", "n-bfreq"], ["p-wiggle", "n-wiggle"], ["p-fps", "n-fps"],
+  ["p-bfreq", "n-bfreq"], ["p-wiggle", "n-wiggle"], ["p-zoom", "n-zoom"],
+  ["p-zoom-freq", "n-zoom-freq"], ["p-fps", "n-fps"],
   ["p-exp-h", "n-exp-h"], ["p-vbitrate", "n-vbitrate"], ["p-gif-colors", "n-gif-colors"],
 ];
 const rangeNumberIds = new Map(rangeBindings);
 const reanalyzeParams = new Set([
   "p-threshold", "p-attack", "p-release", "p-alt-freq", "p-bmin", "p-bmax", "p-bdur",
-  "p-seed", "p-bounce", "p-bfreq", "p-wiggle", "p-fps", "mouth-alternate", "fx-bounce", "fx-wiggle",
+  "p-seed", "p-bounce", "p-bfreq", "p-wiggle", "p-wiggle-pivot", "p-zoom", "p-zoom-freq", "p-zoom-pivot", "p-fps",
+  "mouth-alternate", "fx-bounce", "fx-wiggle", "fx-zoom",
 ]);
 
 const defaultRangeValues = Object.freeze({
@@ -2567,6 +2600,8 @@ const defaultRangeValues = Object.freeze({
   "p-bounce": 0.03,
   "p-bfreq": 3,
   "p-wiggle": 1,
+  "p-zoom": 1.05,
+  "p-zoom-freq": 3,
   "p-fps": 30,
   "p-exp-h": 720,
   "p-vbitrate": 8,
@@ -2773,27 +2808,37 @@ function updateAlternateUi() {
   $("n-alt-freq").disabled = !enabled || state.exporting;
 }
 
-/** 附加动效：只显示已开启开关对应的参数行（弹跳 / 摇摆各自的强度、频率） */
+/** 附加动效：只显示已开启开关对应的参数行（弹跳 / 摇摆 / 放大） */
 function updateFxUi() {
   const bounceOn = $("fx-bounce").checked;
   const wiggleOn = $("fx-wiggle").checked;
+  const zoomOn = $("fx-zoom").checked;
   for (const id of ["p-bounce", "p-bfreq"]) {
     const row = $(id)?.closest(".param");
     if (row) row.hidden = !bounceOn;
   }
-  const wiggleRow = $("p-wiggle")?.closest(".param");
-  if (wiggleRow) wiggleRow.hidden = !wiggleOn;
+  for (const id of ["p-wiggle", "p-wiggle-pivot"]) {
+    const row = $(id)?.closest(".param");
+    if (row) row.hidden = !wiggleOn;
+  }
+  for (const id of ["p-zoom", "p-zoom-freq", "p-zoom-pivot"]) {
+    const row = $(id)?.closest(".param");
+    if (row) row.hidden = !zoomOn;
+  }
 }
 
 $("mouth-alternate").addEventListener("change", () => {
   updateAlternateUi();
   commitParameter("mouth-alternate");
 });
-for (const id of ["fx-bounce", "fx-wiggle"]) {
+for (const id of ["fx-bounce", "fx-wiggle", "fx-zoom"]) {
   $(id).addEventListener("change", () => {
     commitParameter(id);
     updateFxUi();
   });
+}
+for (const id of ["p-wiggle-pivot", "p-zoom-pivot"]) {
+  $(id).addEventListener("change", () => commitParameter(id));
 }
 updateFxUi();
 for (const button of document.querySelectorAll(".param-reset")) {
@@ -2954,6 +2999,21 @@ function setStatus(msg, ok = false) {
   const el = $("status");
   el.textContent = msg;
   el.className = ok ? "ok" : "";
+}
+
+function setExportError(message) {
+  setStatus(message, false);
+  const panel = document.querySelector(".panel");
+  if (!panel) return;
+  const scrollToBottom = () => {
+    if (typeof panel.scrollTo === "function") {
+      panel.scrollTo({ top: panel.scrollHeight, behavior: "smooth" });
+    } else {
+      panel.scrollTop = panel.scrollHeight;
+    }
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(scrollToBottom);
+  else scrollToBottom();
 }
 loadSampleImages();
 void loadSampleAudio();

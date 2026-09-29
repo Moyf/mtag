@@ -57,10 +57,10 @@ export function gifFrameDelays(count, fps) {
 
 /**
  * 计算图片与画布的安全边距。
- * 图片四周至少预留图片高度 10% 的空间，并按当前控件上限为弹跳/摇摆留足余量。
+ * 按图片高度的 10% 与动效上限计算余量；centeredPivot 时上下对称留边，底部轴点则保持底边锚定。
  * 关闭拓展时，画布保持图片原始比例，导出高度只控制图片与画布高度。
  */
-export function canvasLayout(img, targetH, expandCanvas = true) {
+export function canvasLayout(img, targetH, expandCanvas = true, maxZoomScale = 1, centeredPivot = false) {
   const naturalWidth = Number(img?.naturalWidth);
   const naturalHeight = Number(img?.naturalHeight);
   if (!(naturalWidth > 0 && naturalHeight > 0)) {
@@ -79,10 +79,27 @@ export function canvasLayout(img, targetH, expandCanvas = true) {
   }
   const maxBounce = 0.2;
   const maxWiggle = 3 * Math.PI / 180;
-  const halfWidth = imageWidth / 2;
-  const maxHeight = imageHeight * (1 + maxBounce);
+  const requestedZoom = Number(maxZoomScale);
+  const zoomScale = Number.isFinite(requestedZoom) ? Math.max(1, requestedZoom) : 1;
+  const baseHalfWidth = imageWidth / 2;
+  const halfWidth = baseHalfWidth * zoomScale;
+  const maxHeight = imageHeight * (1 + maxBounce) * zoomScale;
+  if (centeredPivot) {
+    const halfHeight = maxHeight / 2;
+    const verticalExtent = halfWidth * Math.sin(maxWiggle) + halfHeight * Math.cos(maxWiggle);
+    const horizontalExtent = halfWidth * Math.cos(maxWiggle) + halfHeight * Math.sin(maxWiggle);
+    const motionPadding = Math.max(0, verticalExtent - imageHeight / 2, horizontalExtent - baseHalfWidth);
+    const padding = Math.max(1, Math.ceil(Math.max(imageHeight * 0.1, motionPadding)));
+    return {
+      width: imageWidth + padding * 2,
+      height: imageHeight + padding * 2,
+      imageWidth,
+      imageHeight,
+      padding,
+    };
+  }
   const topOverflow = halfWidth * Math.sin(maxWiggle) + maxHeight * Math.cos(maxWiggle) - imageHeight;
-  const sideOverflow = halfWidth * Math.cos(maxWiggle) + maxHeight * Math.sin(maxWiggle) - halfWidth;
+  const sideOverflow = halfWidth * Math.cos(maxWiggle) + maxHeight * Math.sin(maxWiggle) - baseHalfWidth;
   // 弹跳只从底部锚点向上拉伸，图片底边无需留白；仅向上/左右拓展安全边距，
   // 摇摆旋转的底角下沉（半宽×sin3°，约十几像素）维持画布底边裁切，与旧版行为一致。
   const motionPadding = Math.max(0, topOverflow, sideOverflow);
@@ -290,6 +307,31 @@ export function talkWiggle(talkStates, fps, intensity = 2.5, freq = 6.0) {
     }
   }
   return rot;
+}
+
+/**
+ * 说话放大：说话期间在原始大小与最大倍率之间平滑往返，停说后平滑还原。
+ * freq 表示每秒完成的放大—还原周期数。
+ */
+export function talkZoom(talkStates, fps, maxScale = 1.05, freq = 3) {
+  const n = talkStates.length;
+  const zoom = new Float32Array(n).fill(1);
+  const safeFps = Math.max(1, Number(fps) || 1);
+  const scale = Math.max(1, Number(maxScale) || 1);
+  const phaseStep = (2 * Math.PI * Math.max(0, Number(freq) || 0)) / safeFps;
+  let phase = 0;
+  for (let i = 0; i < n; i++) {
+    if (talkStates[i]) {
+      phase += phaseStep;
+      const pulse = (1 - Math.cos(phase)) / 2;
+      zoom[i] = 1 + (scale - 1) * pulse;
+    } else {
+      phase = 0;
+      const prev = i > 0 ? zoom[i - 1] : 1;
+      zoom[i] = prev + (1 - prev) * 0.25;
+    }
+  }
+  return zoom;
 }
 
 // ---------- 音频解码（浏览器端，AudioBuffer → mono Float32）----------

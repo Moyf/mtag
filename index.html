@@ -220,6 +220,7 @@ details.card[open] > summary .chev { transform: rotate(90deg); }
 
 /* 开关 */
 .check { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 700; cursor: pointer; margin: 12px 0; }
+.check.fx-toggle > span { color: var(--accent); }
 .switch-list .check { margin: 0; }
 .check input[type=checkbox] {
   flex: none; -webkit-appearance: none; appearance: none; box-sizing: border-box;
@@ -317,6 +318,7 @@ details.card[open] > summary .chev { transform: rotate(90deg); }
 .param-value { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .param-value input[type=number] { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
 .param input[type=range] { width: 100%; }
+.param .pivot-select { width: 100%; }
 .param .hint { margin-top: 4px; }
 .param-label { display: flex; justify-content: space-between; font-size: 12.5px; font-weight: 700; margin-bottom: 8px; }
 .param-reset {
@@ -492,7 +494,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
     <header class="panel-head">
       <div class="title-row">
         <h1>阿墨的说话小人生成器 <span class="product-acronym">MTAG</span></h1>
-        <span class="v2-badge">v0.3.3</span>
+        <span class="v2-badge">v0.3.4</span>
       </div>
       <p>两张图片，一段语音，自动生成说话动画 ✧(ᐛ )</p>
     </header>
@@ -517,7 +519,7 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
           <div class="export-params">
             <div class="param"><div class="param-head"><label for="p-fps">帧率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-fps" title="重置帧率" aria-label="重置帧率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-fps" type="number" min="12" max="60" step="1" value="30" inputmode="numeric" aria-label="帧率"></span></label></div><input type="range" id="p-fps" min="12" max="60" step="1" value="30"></div>
             <div class="param"><div class="param-head"><label for="p-exp-h">导出高度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-exp-h" title="重置导出高度" aria-label="重置导出高度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-exp-h" type="number" min="360" max="1080" step="60" value="720" inputmode="numeric" aria-label="导出高度"></span></label></div><input type="range" id="p-exp-h" min="360" max="1080" step="60" value="720"></div>
-            <label class="check"><span>拓展画布<span class="hint-inline">为弹跳 / 摇摆预留安全边距；关闭后可能裁切动效</span></span><input type="checkbox" id="expand-canvas" checked aria-label="拓展画布"></label>
+            <label class="check"><span>拓展画布<span class="hint-inline">导出时为弹跳 / 摇摆 / 放大预留边距；关闭后可能裁切动效</span></span><input type="checkbox" id="expand-canvas" checked aria-label="拓展画布"></label>
             <div class="param"><div class="param-head"><label for="p-vbitrate">视频码率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-vbitrate" title="重置视频码率" aria-label="重置视频码率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-vbitrate" type="number" min="1" max="16" step="0.5" value="8" inputmode="decimal" aria-label="视频码率"></span></label></div><input type="range" id="p-vbitrate" min="1" max="16" step="0.5" value="8"><div class="hint">越高越清晰、文件越大；<span id="export-size-est">加载音频后显示预估大小</span></div></div>
             <div class="param"><div class="param-head"><label for="p-gif-colors">GIF 颜色数 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-gif-colors" title="重置 GIF 颜色数" aria-label="重置 GIF 颜色数" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-gif-colors" type="number" min="8" max="256" step="8" value="256" inputmode="numeric" aria-label="GIF 颜色数"></span></label></div><input type="range" id="p-gif-colors" min="8" max="256" step="8" value="256"><div class="hint">颜色数量越少体积越小、但颜色断层也越明显。</div></div>
             <div class="param" style="margin-bottom:0">
@@ -579,13 +581,18 @@ input[type=number]:disabled, select:disabled { opacity: .4; }
     </details>
 
     <details class="card">
-      <summary><span class="step">3</span>附加动效<span class="summary-sub">弹跳 / 摇摆动效</span><span class="chev">›</span></summary>
+      <summary><span class="step">3</span>附加动效<span class="summary-sub">弹跳 / 摇摆 / 放大</span><span class="chev">›</span></summary>
       <div class="card-body">
-        <label class="check"><span>说话弹跳（squash &amp; stretch）</span><input type="checkbox" id="fx-bounce" checked></label>
+        <label class="check fx-toggle"><span>说话弹跳（squash &amp; stretch）</span><input type="checkbox" id="fx-bounce" checked></label>
         <div class="param"><div class="param-head"><label for="p-bounce">弹跳强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bounce" title="重置弹跳强度" aria-label="重置弹跳强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bounce" type="number" min="0.01" max="0.2" step="0.01" value="0.03" inputmode="decimal" aria-label="弹跳强度"></span></label></div><input type="range" id="p-bounce" min="0.01" max="0.2" step="0.01" value="0.03"></div>
         <div class="param"><div class="param-head"><label for="p-bfreq">弹跳频率 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-bfreq" title="重置弹跳频率" aria-label="重置弹跳频率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-bfreq" type="number" min="1" max="8" step="0.5" value="3" inputmode="decimal" aria-label="弹跳频率"></span></label></div><input type="range" id="p-bfreq" min="1" max="8" step="0.5" value="3"></div>
-        <label class="check"><span>说话摇摆（rotate）</span><input type="checkbox" id="fx-wiggle"></label>
-        <div class="param" style="margin-bottom:0"><div class="param-head"><label for="p-wiggle">摇摆强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-wiggle" title="重置摇摆强度" aria-label="重置摇摆强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-wiggle" type="number" min="0.5" max="3" step="0.5" value="1" inputmode="decimal" aria-label="摇摆强度"></span></label></div><input type="range" id="p-wiggle" min="0.5" max="3" step="0.5" value="1"></div>
+        <label class="check fx-toggle"><span>说话摇摆（rotate）</span><input type="checkbox" id="fx-wiggle"></label>
+        <div class="param" hidden><div class="param-head"><label for="p-wiggle-pivot">摇摆轴点位置</label></div><select class="pivot-select" id="p-wiggle-pivot" aria-label="摇摆轴点位置"><option value="center">中心</option><option value="bottom" selected>底部</option></select></div>
+        <div class="param"><div class="param-head"><label for="p-wiggle">摇摆强度 <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-wiggle" title="重置摇摆强度" aria-label="重置摇摆强度" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-wiggle" type="number" min="0.5" max="3" step="0.5" value="1" inputmode="decimal" aria-label="摇摆强度"></span></label></div><input type="range" id="p-wiggle" min="0.5" max="3" step="0.5" value="1"></div>
+        <label class="check fx-toggle"><span>说话放大（zoom）</span><input type="checkbox" id="fx-zoom"></label>
+        <div class="param" hidden><div class="param-head"><label for="p-zoom-pivot">放大轴点位置</label></div><select class="pivot-select" id="p-zoom-pivot" aria-label="放大轴点位置"><option value="center">中心</option><option value="bottom" selected>底部</option></select></div>
+        <div class="param"><div class="param-head"><label for="p-zoom">最大放大比例（×） <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-zoom" title="重置最大放大比例" aria-label="重置最大放大比例" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-zoom" type="number" min="1" max="1.2" step="0.05" value="1.05" inputmode="decimal" aria-label="最大放大比例"></span></label></div><input type="range" id="p-zoom" min="1" max="1.2" step="0.05" value="1.05"><div class="hint">1.0× 为原始大小；说话时在原尺寸与设定比例间平滑循环。</div></div>
+        <div class="param" style="margin-bottom:0"><div class="param-head"><label for="p-zoom-freq">放大频率（Hz） <span class="param-value"><button class="param-reset" type="button" data-reset-for="p-zoom-freq" title="重置放大频率" aria-label="重置放大频率" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-reset"></use></svg></button><input class="param-number" id="n-zoom-freq" type="number" min="3" max="5" step="0.1" value="3" inputmode="decimal" aria-label="放大频率"></span></label></div><input type="range" id="p-zoom-freq" min="3" max="5" step="0.1" value="3"><div class="hint">每秒完成的放大—还原循环次数。</div></div>
       </div>
     </details>
 
